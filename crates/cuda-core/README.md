@@ -22,7 +22,7 @@ This crate turns raw CUDA handles into Rust types with automatic cleanup on drop
 - **Modules**: `ctx.load_module_from_file("kernel.ptx")` / `ctx.load_module_from_ptx_src(src)` load compiled GPU code. `module.load_function("kernel_name")` extracts a callable function handle.
 - **Memory**: Async (`malloc_async`, `free_async`, `memcpy_htod_async`, ...) and sync (`malloc_sync`, `free_sync`) device memory operations.
 - **Device buffers**: `DeviceBuffer<T>` owns device memory and provides host-device transfer helpers for `T: DeviceCopy`.
-- **Pinned host memory**: `PinnedHostBuffer<T>` allocates page-locked host memory for faster transfers and true async overlap when used with non-blocking copies.
+- **Pinned host memory**: `PinnedHostBuffer<T>` allocates page-locked host memory for faster transfers. Use `copy_to_pinned_host_async` when device-to-host transfers should overlap with later synchronization.
 - **Launch**: `launch_kernel(func, grid, block, smem, stream, params)` enqueues a kernel on a stream. `launch_kernel_ex(...)` adds cluster dimensions (Hopper+); `launch_kernel_cooperative(...)` enables `Grid::sync()` for grid-wide barriers.
 - **Events**: `ctx.new_event(flags)` for synchronization points and GPU-side timing via `event.elapsed_ms(end)`.
 

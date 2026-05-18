@@ -172,13 +172,15 @@ pub unsafe fn memset_d8_async(
 /// Allocates `num_bytes` of page-locked host memory.
 ///
 /// Pinned host memory can be used as a staging area for CUDA transfers that
-/// need higher bandwidth or true asynchronous overlap. Pair with [`free_host`].
+/// need higher bandwidth, and is required for host-device copies that are
+/// intended to overlap with GPU work. Pair with [`free_host`].
 ///
 /// # Safety
 ///
 /// - A CUDA context must be bound to the calling thread.
-/// - `num_bytes` must be greater than zero and must not exceed the host memory
-///   available for page-locked allocations.
+/// - `num_bytes` must not exceed the host memory available for page-locked
+///   allocations. Passing zero bytes is not useful and the CUDA driver reports
+///   it as an error.
 pub unsafe fn malloc_host(num_bytes: usize) -> Result<*mut c_void, DriverError> {
     let mut host_ptr = MaybeUninit::uninit();
     unsafe {
