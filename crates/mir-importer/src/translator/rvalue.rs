@@ -557,6 +557,9 @@ pub fn translate_rvalue(
 
             // Record rustc's niche encoding on the cast so mir-lower can
             // rebuild our un-niched `MirEnumType` aggregate (issue #21).
+            // The attribute is a typed `NicheEncodingAttr` so the contract
+            // between importer and lowering is enforced by pliron rather
+            // than by a hand-rolled string key.
             if matches!(kind, mir::CastKind::Transmute)
                 && let Ok(layout) = ty.layout()
                 && let rustc_public::abi::VariantsShape::Multiple {
@@ -569,21 +572,25 @@ pub fn translate_rvalue(
                     ..
                 } = &layout.shape().variants
             {
-                let niche_start_i64 =
-                    i64::try_from(*niche_start).map_err(|_| {
-                        input_error_noloc!(TranslationErr::unsupported(format!(
-                            "Niche start {} does not fit in i64; this niched-enum Transmute is not yet supported",
-                            niche_start
-                        )))
-                    })?;
-                let niche_variant_idx = niche_variants.start().to_index() as i64;
-                let untagged_variant_idx = untagged_variant.to_index() as i64;
-                set_niche_transmute_attrs(
+                // Niched scalars are at most 64 bits wide. If rustc ever
+                // hands us something wider, fail loudly instead of
+                // truncating: the wrong bit pattern would silently match a
+                // different enum variant at runtime.
+                let niche_start_u64 = u64::try_from(*niche_start).map_err(|_| {
+                    input_error_noloc!(TranslationErr::unsupported(format!(
+                        "Niche start {} exceeds u64; niched-enum Transmute with > 64-bit scalar is not supported",
+                        niche_start
+                    )))
+                })?;
+                let niche_variant_idx = niche_variants.start().to_index() as u32;
+                let untagged_variant_idx = untagged_variant.to_index() as u32;
+                cast_op.set_attr_niche_encoding(
                     ctx,
-                    op,
-                    niche_start_i64,
-                    niche_variant_idx,
-                    untagged_variant_idx,
+                    dialect_mir::attributes::NicheEncodingAttr {
+                        niche_start: niche_start_u64,
+                        niche_variant_idx,
+                        untagged_variant_idx,
+                    },
                 );
             }
 
@@ -5989,31 +5996,6 @@ fn create_ghost_enum_default(
     op
 }
 
-// Niche-encoding attribute keys read back by mir-lower's cast lowering;
-// keep in sync with `crates/mir-lower/src/convert/ops/cast.rs`.
-const NICHE_START_ATTR: &str = "niche_start";
-const NICHE_VARIANT_IDX_ATTR: &str = "niche_variant_idx";
-const UNTAGGED_VARIANT_IDX_ATTR: &str = "untagged_variant_idx";
-
-fn set_niche_transmute_attrs(
-    ctx: &mut Context,
-    op: Ptr<Operation>,
-    niche_start: i64,
-    niche_variant_idx: i64,
-    untagged_variant_idx: i64,
-) {
-    use pliron::builtin::attributes::IntegerAttr;
-    let i64_ty = IntegerType::get(ctx, 64, Signedness::Signed);
-    let width = NonZeroUsize::new(64).unwrap();
-    let pairs: [(&str, i64); 3] = [
-        (NICHE_START_ATTR, niche_start),
-        (NICHE_VARIANT_IDX_ATTR, niche_variant_idx),
-        (UNTAGGED_VARIANT_IDX_ATTR, untagged_variant_idx),
-    ];
-    for (key, value) in pairs {
-        let apint = APInt::from_i64(value, width);
-        let attr = IntegerAttr::new(i64_ty, apint);
-        let ident: pliron::identifier::Identifier = key.try_into().expect("static identifier");
-        op.deref_mut(ctx).attributes.0.insert(ident, attr.into());
-    }
-}
+// (The hand-rolled niche-attribute writer that lived here was replaced
+// by `MirCastOp::set_attr_niche_encoding(...)`, generated from the typed
+// `NicheEncodingAttr` slot declared on the op.)
