@@ -6,10 +6,10 @@ This section walks through installing cuda-oxide, creating a project, writing a 
 
 ## Install cargo-oxide
 
-If you haven't already, install the build tool:
+If you haven't already, install the build tool, and you must build cuda-oxide in Rust nightly mode:
 
 ```bash
-cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 Verify that your environment is set up correctly:

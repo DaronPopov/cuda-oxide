@@ -130,12 +130,12 @@ cargo oxide debug vecadd --tui
 
 #### cargo-oxide
 
-Inside the cuda-oxide repo, `cargo oxide` works out of the box via a workspace alias.
+Inside the cuda-oxide repo, `cargo oxide` works out of the box via a workspace alias, and you must build cuda-oxide in Rust nightly mode.
 
 For use outside the repo (your own projects):
 
 ```bash
-cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend.

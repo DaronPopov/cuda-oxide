@@ -167,9 +167,10 @@ The two extra components are required by the codegen backend:
 **Inside the cuda-oxide repo**, it works out of the box via a workspace alias -- no extra install step.
 
 **For use outside the repo** (your own projects):
+You must build cuda-oxide in Rust nightly mode.
 
 ```bash
-cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend. Subsequent runs reuse the cached build.
