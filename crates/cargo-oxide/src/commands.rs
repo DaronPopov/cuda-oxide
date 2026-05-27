@@ -644,17 +644,59 @@ pub fn doctor(ctx: &Context) {
     //
     // cuda-oxide requires LLVM 21+: earlier releases reject modern TMA /
     // tcgen05 / WGMMA intrinsic signatures. Probe in the same order as the
-    // pipeline (llc-22 → llc-21), falling back to bare `llc` only for
-    // reporting purposes. Whatever we pick, reject if the major version
-    // is < 21.
+    // pipeline:
+    //   1. `CUDA_OXIDE_LLC` (caller-supplied override)
+    //   2. Rust toolchain's `llvm-tools` component (auto-installed via rustup)
+    //   3. `llc-22`, `llc-21`, `llc` on `PATH`
+    // Whatever we pick, reject if the major version is < 21.
     print!("llc (LLVM)... ");
-    let llc_pick = ["llc-22", "llc-21", "llc"].iter().find_map(|candidate| {
+
+    // The pipeline's primary entry: the `llc` bundled with the pinned Rust
+    // toolchain's `llvm-tools` component. Built with the NVPTX backend
+    // enabled, so the typical novice path is `rustup component add llvm-tools`
+    // and that's it. Surface the absolute path so doctor's output matches
+    // what the pipeline actually invokes.
+    let rustup_llc_path: Option<String> = Command::new("rustc")
+        .args(["--print", "sysroot", "--print", "host-tuple"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|output| {
+            let stdout = String::from_utf8(output.stdout).ok()?;
+            let mut lines = stdout.lines();
+            let sysroot = lines.next()?;
+            let host = lines.next()?;
+            let path: std::path::PathBuf = [sysroot, "lib", "rustlib", host, "bin", "llc"]
+                .iter()
+                .collect();
+            path.is_file()
+                .then(|| path.to_str().map(str::to_string))
+                .flatten()
+        });
+
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(env_llc) = std::env::var("CUDA_OXIDE_LLC") {
+        candidates.push(env_llc);
+    }
+    if let Some(rustup) = rustup_llc_path.clone() {
+        candidates.push(rustup);
+    }
+    for name in ["llc-22", "llc-21", "llc"] {
+        candidates.push(name.to_string());
+    }
+
+    let llc_pick = candidates.iter().find_map(|candidate| {
         Command::new(candidate)
             .arg("--version")
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| (*candidate, String::from_utf8_lossy(&o.stdout).into_owned()))
+            .map(|o| {
+                (
+                    candidate.clone(),
+                    String::from_utf8_lossy(&o.stdout).into_owned(),
+                )
+            })
     });
     match llc_pick {
         Some((binary, stdout)) => {
@@ -678,8 +720,9 @@ pub fn doctor(ctx: &Context) {
                         binary, v
                     );
                     eprintln!("  WGMMA intrinsic signatures cuda-oxide emits. Install a newer");
-                    eprintln!("  toolchain (`sudo apt install llvm-21`) and either add it to");
-                    eprintln!("  PATH or set `CUDA_OXIDE_LLC=/usr/bin/llc-21`.");
+                    eprintln!("  toolchain (`rustup component add llvm-tools` is usually enough,");
+                    eprintln!("  or `sudo apt install llvm-21`) and either add it to PATH or set");
+                    eprintln!("  `CUDA_OXIDE_LLC=/path/to/llc`.");
                     ok = false;
                 }
                 None => println!("✓ {} ({}, version could not be parsed)", banner, binary),
@@ -687,9 +730,11 @@ pub fn doctor(ctx: &Context) {
         }
         None => {
             println!("✗ llc not found");
-            eprintln!("  Install LLVM 21+: sudo apt install llvm-21");
-            eprintln!("  (cuda-oxide probes llc-22 then llc-21 on PATH;");
-            eprintln!("   older versions reject modern TMA/tcgen05 intrinsics)");
+            eprintln!("  cuda-oxide probes (in order): $CUDA_OXIDE_LLC, the Rust toolchain's");
+            eprintln!("  llvm-tools llc, then llc-22/llc-21/llc on PATH. Easiest fix:");
+            eprintln!("    rustup component add llvm-tools");
+            eprintln!("  Alternative: `sudo apt install llvm-21` (older versions reject");
+            eprintln!("  modern TMA / tcgen05 / WGMMA intrinsics).");
             ok = false;
         }
     }
@@ -962,10 +1007,10 @@ fn touch_main_rs(example_dir: &Path) {
     }
 }
 
-/// Remove stale generated artifacts (`.ptx`, `.ll`, `.ltoir`) from a
+/// Remove stale generated artifacts (`.ptx`, `.ll`, `.ltoir`, `.cubin`) from a
 /// previous run so we can verify the build produces fresh output.
 fn clean_generated_files(example_dir: &Path, example: &str) {
-    for ext in &["ptx", "ll", "ltoir"] {
+    for ext in &["ptx", "ll", "ltoir", "cubin"] {
         let file = example_dir.join(format!("{}.{}", example, ext));
         if file.exists() {
             let _ = std::fs::remove_file(&file);
@@ -1012,7 +1057,7 @@ const GIT_REPO: &str = "https://github.com/NVlabs/cuda-oxide.git";
 
 const RUST_TOOLCHAIN_TOML: &str = r#"[toolchain]
 channel = "nightly-2026-04-03"
-components = ["rust-src", "rustc-dev", "rust-analyzer"]
+components = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "llvm-tools"]
 "#;
 
 /// Scaffold a new standalone cuda-oxide project.

@@ -373,19 +373,25 @@ llc -march=nvptx64 -mcpu=sm_90 kernel.ll -o kernel.ptx
 
 ### Target Selection
 
-The pipeline probes for `llc` on `PATH` in the order below. LLVM 21 is the
-minimum — earlier releases reject the TMA / tcgen05 / WGMMA intrinsic
-signatures that cuda-oxide emits.
+The pipeline probes for `llc` in the order below. LLVM 21 is the minimum —
+earlier releases reject the TMA / tcgen05 / WGMMA intrinsic signatures
+that cuda-oxide emits.
 
-| Priority | llc Version | Target                   | PTX Version |
-| :------- | :---------- | :----------------------- | :---------- |
-| 1st      | `llc-22`    | `sm_100a` (Blackwell DC) | PTX 8.x     |
-| 2nd      | `llc-21`    | `sm_100` / `sm_120`      | PTX 8.x     |
+| Priority | Source                                                    | Notes                                                                 |
+| :------- | :-------------------------------------------------------- | :-------------------------------------------------------------------- |
+| 1st      | `$CUDA_OXIDE_LLC` (if set)                                | Caller-supplied override; whatever binary you point it at.            |
+| 2nd      | Rust toolchain's `llvm-tools` llc                         | `<sysroot>/lib/rustlib/<host>/bin/llc` (auto-installed via `rustup`). |
+| 3rd      | `llc-22` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 22.                           |
+| 4th      | `llc-21` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 21.                           |
+| 5th      | `llc` on `PATH`                                           | Reporting fallback only; rejected at runtime if older than LLVM 21.   |
 
-If neither is available the pipeline fails with a clear error. You can opt
-into a specific (possibly older) binary by setting
-`CUDA_OXIDE_LLC=/path/to/llc`, but simple kernels are the only thing
-guaranteed to compile on LLVM 20 and below.
+The pinned Rust toolchain (`nightly-2026-04-03`) ships LLVM 22 with NVPTX
+enabled, so `rustup component add llvm-tools` is the recommended onboarding
+path. The PATH probes for `llc-22` / `llc-21` are kept as a fallback for
+users with an existing LLVM install. If none of the probes succeed the
+pipeline fails with a clear error. You can opt into a specific (possibly
+older) binary by setting `CUDA_OXIDE_LLC=/path/to/llc`, but simple kernels
+are the only thing guaranteed to compile on LLVM 20 and below.
 
 If the selected target does not match the physical GPU, the CUDA driver
 JIT-compiles the PTX at load time. First launch costs roughly 30ms while the

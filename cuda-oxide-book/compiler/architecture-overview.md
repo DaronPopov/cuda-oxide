@@ -47,10 +47,14 @@ run the whole thing under Miri if you feel adventurous. Standard Rust tooling,
 all the way down.
 
 ```{note}
-`llc` is the one external binary. It comes from an LLVM installation with the
-NVPTX backend enabled; the CUDA Toolkit alone is not enough. All cuda-oxide
-stages up to LLVM IR emission are implemented in Rust; after the backend writes
-the `.ll` file, it invokes external LLVM `llc` to generate PTX.
+`llc` is the one external binary. The pinned Rust toolchain's `llvm-tools`
+component ships `llc` with the NVPTX backend enabled, so on a fresh clone
+`rustup component add llvm-tools` (already listed in `rust-toolchain.toml`)
+is the only step needed. A system LLVM 21+ install also works and serves as
+the fallback. The CUDA Toolkit alone is not enough — it does not include
+`llc`. All cuda-oxide stages up to LLVM IR emission are implemented in
+Rust; after the backend writes the `.ll` file, it invokes external LLVM
+`llc` to generate PTX.
 ```
 
 ---
