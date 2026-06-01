@@ -28,7 +28,8 @@ jobs:
         with:
           cuda: "13.1.1"
           method: network
-          sub-packages: '["nvcc", "cudart-dev", "curand-dev"]'
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcurand-dev"]'
 
       - name: Run clippy (workspace crates)
         env:
