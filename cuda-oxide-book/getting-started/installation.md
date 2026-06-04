@@ -137,6 +137,8 @@ The issue may be that the versioned binary (e.g., clang-21) is installed but not
 sudo apt install clang libclang-dev
 ```
 
+:::
+
 :::{note}
 **Fresh Ubuntu 24.04 / DGX-OS:** after installing LLVM 21 via `apt.llvm.org/llvm.sh` as shown above, the versioned `clang-21` / `clang++-21` binaries are present but the unversioned aliases `cargo oxide doctor` looks for are not. Add them with `update-alternatives`:
 
