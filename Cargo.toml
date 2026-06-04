@@ -45,9 +45,9 @@ repository = "https://github.com/NVlabs/cuda-oxide.git"
 # bridge. `crates/rustc-codegen-cuda/Cargo.toml` MUST stay on this same rev, or
 # pliron resolves to two distinct crates and types stop unifying. Bump the rev if
 # that branch is amended during review.
-pliron = { git = "https://github.com/nihalpasham/pliron", rev = "c239bd64c5d870631611ab8b346f421c02312e95" }
-pliron-derive = { git = "https://github.com/nihalpasham/pliron", rev = "c239bd64c5d870631611ab8b346f421c02312e95" }
-pliron-llvm = { git = "https://github.com/nihalpasham/pliron", rev = "c239bd64c5d870631611ab8b346f421c02312e95", default-features = false }
+pliron = { git = "https://github.com/nihalpasham/pliron", rev = "94d925477aeea59feba0d6b1314aa2b7e01a71aa" }
+pliron-derive = { git = "https://github.com/nihalpasham/pliron", rev = "94d925477aeea59feba0d6b1314aa2b7e01a71aa" }
+pliron-llvm = { git = "https://github.com/nihalpasham/pliron", rev = "94d925477aeea59feba0d6b1314aa2b7e01a71aa", default-features = false }
 
 # Internal crates
 llvm-export = { path = "crates/llvm-export" }
