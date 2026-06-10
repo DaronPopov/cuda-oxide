@@ -665,11 +665,18 @@ pub(crate) fn convert_three_way_cmp(
     operands_info: &OperandsInfo,
 ) -> Result<()> {
     let (lhs, rhs) = get_binary_operands(op, ctx)?;
-    let is_signed = if is_float_type(ctx, lhs) {
-        false
-    } else {
-        is_signed_int_op(ctx, op, operands_info)?
-    };
+    if is_float_type(ctx, lhs) {
+        // rustc never emits BinOp::Cmp for floats: f32/f64 are not Ord,
+        // and f32::total_cmp lowers to integer bit-twiddling, not Cmp.
+        // An OLT/OGT select chain would also miscompile: NaN compares
+        // false on both predicates and would silently yield Equal.
+        let loc = op.deref(ctx).loc();
+        return pliron::input_err!(
+            loc,
+            "BinOp::Cmp on floats is never emitted by rustc; total-order lowering unimplemented"
+        );
+    }
+    let is_signed = is_signed_int_op(ctx, op, operands_info)?;
 
     let is_lt = emit_cmp_value(ctx, rewriter, op, lhs, rhs, is_signed, true);
     let is_gt = emit_cmp_value(ctx, rewriter, op, lhs, rhs, is_signed, false);
@@ -717,6 +724,10 @@ pub(crate) fn convert_three_way_cmp(
     Ok(())
 }
 
+/// Emit one integer comparison leg of the three-way compare.
+///
+/// Float operands are rejected by [`convert_three_way_cmp`] before this
+/// runs, so only integer predicates are needed.
 fn emit_cmp_value(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -726,31 +737,13 @@ fn emit_cmp_value(
     is_signed: bool,
     less: bool,
 ) -> Value {
-    let (signed_pred, unsigned_pred, float_pred) = if less {
-        (
-            ICmpPredicateAttr::SLT,
-            ICmpPredicateAttr::ULT,
-            FCmpPredicateAttr::OLT,
-        )
-    } else {
-        (
-            ICmpPredicateAttr::SGT,
-            ICmpPredicateAttr::UGT,
-            FCmpPredicateAttr::OGT,
-        )
+    let pred = match (less, is_signed) {
+        (true, true) => ICmpPredicateAttr::SLT,
+        (true, false) => ICmpPredicateAttr::ULT,
+        (false, true) => ICmpPredicateAttr::SGT,
+        (false, false) => ICmpPredicateAttr::UGT,
     };
-    let cmp_op = if is_float_type(ctx, lhs) {
-        let fcmp = llvm::FCmpOp::new(ctx, float_pred, lhs, rhs).get_operation();
-        add_fastmath_flags(ctx, fcmp);
-        fcmp
-    } else {
-        let pred = if is_signed {
-            signed_pred
-        } else {
-            unsigned_pred
-        };
-        llvm::ICmpOp::new(ctx, pred, lhs, rhs).get_operation()
-    };
+    let cmp_op = llvm::ICmpOp::new(ctx, pred, lhs, rhs).get_operation();
     cmp_op.deref_mut(ctx).set_loc(op.deref(ctx).loc());
     rewriter.insert_operation(ctx, cmp_op);
     cmp_op.deref(ctx).get_result(0)

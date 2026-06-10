@@ -588,15 +588,35 @@ pub(crate) fn convert_construct_enum(
     rewriter.insert_operation(ctx, undef_op.get_operation());
     let mut current_struct = undef_op.get_operation().deref(ctx).get_result(0);
 
-    let discr_width = llvm_discriminant_ty
+    // The tag width comes from the enum's discriminant type; assuming a
+    // width (the old `unwrap_or(8)`) would silently store a wrong-sized
+    // tag for any enum whose discriminant is not an integer type.
+    let discr_width = match llvm_discriminant_ty
         .deref(ctx)
         .downcast_ref::<IntegerType>()
         .map(|t| t.width())
-        .unwrap_or(8);
-    let discr_value = variant_discriminants
-        .get(variant_index)
-        .copied()
-        .unwrap_or(variant_index as u64);
+    {
+        Some(w) => w,
+        None => {
+            return pliron::input_err_noloc!(
+                "MirConstructEnumOp discriminant type must be an integer type"
+            );
+        }
+    };
+    // The stored tag is the variant's declared discriminant VALUE (not the
+    // variant index). A variant index without a discriminant entry means
+    // the MirEnumType is malformed; falling back to the index would
+    // silently resurrect the issue #146 miscompile.
+    let discr_value = match variant_discriminants.get(variant_index).copied() {
+        Some(v) => v,
+        None => {
+            return pliron::input_err_noloc!(
+                "MirConstructEnumOp variant index {} has no discriminant ({} discriminants recorded)",
+                variant_index,
+                variant_discriminants.len()
+            );
+        }
+    };
     let discr_apint = APInt::from_u64(
         discr_value,
         NonZeroUsize::new(discr_width as usize).unwrap(),

@@ -196,6 +196,18 @@ impl Verify for MirGeOp {
     }
 }
 
+/// MIR three-way comparison (`Ord::cmp`, result is `core::cmp::Ordering`).
+///
+/// # Verification
+///
+/// - Must have exactly 2 operands.
+/// - Both operands must have the same type.
+/// - Operands must be integers (covers `iN`/`uN` plus `bool` and `char`,
+///   which the type translator models as `i1` and `ui32`). rustc never
+///   emits `BinOp::Cmp` for floats (they are not `Ord`), and the lowering
+///   has no float total-order support, so float operands are rejected
+///   here instead of reaching the lowering.
+/// - Result must be a fieldless 3-variant enum (the `Ordering` shape).
 #[pliron_op(
     name = "mir.cmp",
     format,
@@ -215,6 +227,13 @@ impl Verify for MirCmpOp {
         if lhs_ty != rhs_ty {
             return verify_err!(op.loc(), "MirCmpOp operands must be of the same type");
         }
+        if !lhs_ty.deref(ctx).is::<IntegerType>() {
+            return verify_err!(
+                op.loc(),
+                "MirCmpOp operands must be integers (bool/char included); \
+                 floats have no BinOp::Cmp in rustc"
+            );
+        }
 
         let res_ty = res.get_type(ctx);
         let res_ty_obj = res_ty.deref(ctx);
@@ -223,6 +242,12 @@ impl Verify for MirCmpOp {
         };
         if enum_ty.variant_count() != 3 {
             return verify_err!(op.loc(), "MirCmpOp result enum must have three variants");
+        }
+        if enum_ty.variant_field_counts.iter().any(|&c| c != 0) {
+            return verify_err!(
+                op.loc(),
+                "MirCmpOp result enum variants must be fieldless (Ordering shape)"
+            );
         }
 
         Ok(())

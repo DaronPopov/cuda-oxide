@@ -5452,8 +5452,20 @@ fn enum_variant_index_from_bytes(
 
             match tag_encoding {
                 rustc_public::abi::TagEncoding::Direct => {
-                    Ok(discriminant_to_variant_index(rust_ty, tag_value as usize)
-                        .unwrap_or(tag_value as usize))
+                    // The tag bytes hold a declared discriminant VALUE; the
+                    // caller wants a variant INDEX. A tag that matches no
+                    // declared discriminant means we misread the constant;
+                    // falling back to "value == index" would silently
+                    // conflate the two semantics (the issue #146 bug class).
+                    discriminant_to_variant_index(rust_ty, tag_value as usize).ok_or_else(|| {
+                        input_error!(
+                            loc.clone(),
+                            TranslationErr::unsupported(format!(
+                                "Enum constant tag value {} matches no declared discriminant",
+                                tag_value
+                            ))
+                        )
+                    })
                 }
                 rustc_public::abi::TagEncoding::Niche {
                     untagged_variant,

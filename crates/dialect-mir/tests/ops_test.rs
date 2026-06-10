@@ -571,6 +571,18 @@ fn test_mir_comparison_verify() {
         vec![0, 1],
         vec![unit("A"), unit("B")],
     );
+    // Payload variants disqualify the Ordering shape.
+    let payload_ty = MirEnumType::get(
+        &mut context,
+        "ThreeWithPayload".to_string(),
+        i8_ty.into(),
+        vec![0, 1, 2],
+        vec![
+            unit("A"),
+            EnumVariant::new("B".to_string(), vec![i32_ty.into()]),
+            unit("C"),
+        ],
+    );
     let mut check_cmp_result = |result_ty, valid| {
         let op = Operation::new(
             &mut context,
@@ -585,6 +597,25 @@ fn test_mir_comparison_verify() {
     check_cmp_result(ordering_ty.into(), true);
     check_cmp_result(i32_ty.into(), false);
     check_cmp_result(two_variant_ty.into(), false);
+    check_cmp_result(payload_ty.into(), false);
+
+    // Float operands are rejected: rustc never emits BinOp::Cmp on floats.
+    let f32_ty = FP32Type::get(&context);
+    let fblk = BasicBlock::new(&mut context, None, vec![f32_ty.into(), f32_ty.into()]);
+    let flhs = fblk.deref(&context).get_argument(0);
+    let frhs = fblk.deref(&context).get_argument(1);
+    let float_cmp = Operation::new(
+        &mut context,
+        MirCmpOp::get_concrete_op_info(),
+        vec![ordering_ty.into()],
+        vec![flhs, frhs],
+        vec![],
+        0,
+    );
+    assert!(
+        float_cmp.verify(&context).is_err(),
+        "float mir.cmp must be rejected"
+    );
 }
 
 #[test]
