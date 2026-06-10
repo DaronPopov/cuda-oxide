@@ -1018,43 +1018,42 @@ pub fn translate_rvalue(
                 }
                 last_inserted = Some(field_addr_op);
 
-                let mut result_val = field_addr_op.deref(ctx).get_result(0);
+                let result_val = field_addr_op.deref(ctx).get_result(0);
 
+                // Walk any remaining projection tail (`Field`, `Index`,
+                // `ConstantIndex`) with the shared address walker so raw
+                // pointers get the same treatment as `Rvalue::Ref`. The
+                // previous inline loop here recognised only nested `Field`
+                // projections and silently `break`'d on anything else,
+                // returning a pointer to the array (element 0) for places
+                // like `&raw mut (*p).0[i]` -- the same wrong-prefix-address
+                // bug as issue #120, just on the raw-pointer path.
                 if place.projection.len() > 2 {
-                    for proj in &place.projection[2..] {
-                        if let mir::ProjectionElem::Field(nested_field_idx, nested_field_ty) = proj
-                        {
-                            let nested_field_type =
-                                super::types::translate_type(ctx, nested_field_ty)?;
-                            let nested_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
-                                ctx,
-                                nested_field_type,
-                                is_mutable,
-                            );
-                            let nested_field_addr_op = Operation::new(
-                                ctx,
-                                MirFieldAddrOp::get_concrete_op_info(),
-                                vec![nested_ptr_ty.into()],
-                                vec![result_val],
-                                vec![],
-                                0,
-                            );
-                            nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
-                            let mir_nested_op = MirFieldAddrOp::new(nested_field_addr_op);
-                            mir_nested_op.set_attr_field_index(
-                                ctx,
-                                dialect_mir::attributes::FieldIndexAttr(*nested_field_idx as u32),
-                            );
-
-                            if let Some(prev) = last_inserted {
-                                nested_field_addr_op.insert_after(ctx, prev);
-                            }
-                            last_inserted = Some(nested_field_addr_op);
-                            result_val = nested_field_addr_op.deref(ctx).get_result(0);
-                        } else {
-                            break;
-                        }
-                    }
+                    return match translate_place_addr_from_slot(
+                        ctx,
+                        body,
+                        value_map,
+                        result_val,
+                        &place.projection[2..],
+                        is_mutable,
+                        block_ptr,
+                        last_inserted,
+                        loc.clone(),
+                    )? {
+                        Some((tail_val, tail_last)) => Ok((None, tail_val, tail_last)),
+                        // Same policy as Rvalue::Ref: a partial field
+                        // address points at the wrong place, so refuse
+                        // loudly rather than miscompile.
+                        None => input_err!(
+                            loc,
+                            TranslationErr::unsupported(format!(
+                                "Rvalue::AddressOf: cannot lower tail projection {:?} of place \
+                                 {:?} to an address; refusing to emit a partial field address",
+                                &place.projection[2..],
+                                place
+                            ))
+                        ),
+                    };
                 }
 
                 return Ok((None, result_val, last_inserted));
