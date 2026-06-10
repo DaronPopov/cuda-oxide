@@ -571,8 +571,9 @@ impl EnumVariant {
 ///   variant index.
 /// - All variants' payload fields concatenated in declaration order (NOT
 ///   overlapped like Rust's real layout). mir-lower uses `total_size` to pad
-///   the struct to rustc's size, or to reject memory traversal loudly when
-///   concatenation makes the struct larger than the Rust object.
+///   the struct to rustc's size, or to reject such enums loudly at the
+///   kernel ABI boundary when concatenation makes the struct larger than
+///   the Rust object (device-local use stays self-consistent and allowed).
 ///
 /// Note: For simplicity, we store variant info in flattened vectors
 /// since the `#[format_type]` macro has trouble with nested structs.
