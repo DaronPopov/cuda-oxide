@@ -170,6 +170,20 @@ fn translate_pointer_like(
             let elem = translate_type(ctx, &elem_ty)?;
             Ok(MirSliceType::get(ctx, elem).into())
         }
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Str) => {
+            // `&str` / `*const str` is a fat pointer (data ptr + length),
+            // exactly like `&[u8]`. Without this arm it would fall through
+            // to the generic case below and become a THIN pointer to the
+            // slice struct: 8 bytes where Rust has 16, silently corrupting
+            // any local that holds one.
+            let u8_ty = pliron::builtin::types::IntegerType::get(
+                ctx,
+                8,
+                pliron::builtin::types::Signedness::Unsigned,
+            )
+            .into();
+            Ok(MirSliceType::get(ctx, u8_ty).into())
+        }
         rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Adt(adt_def, substs))
             if adt_def.trimmed_name() == "SharedArray" =>
         {
@@ -913,6 +927,50 @@ pub fn translate_type(
         // `ty.layout()` on the enclosing ADT, not here.
         rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Pat(base_ty, _pat)) => {
             translate_type(ctx, &base_ty)
+        }
+        // `str` is an unsized byte sequence (appears in dead panic-message
+        // branches). Translate as a `[u8]`-style slice.
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Str) => {
+            let u8_ty = pliron::builtin::types::IntegerType::get(
+                ctx,
+                8,
+                pliron::builtin::types::Signedness::Unsigned,
+            )
+            .into();
+            Ok(MirSliceType::get(ctx, u8_ty).into())
+        }
+        // Function pointer type (e.g. `fmt` fn ptrs in dead panic-formatting
+        // branches): a thin opaque pointer.
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnPtr(_)) => {
+            let target = dialect_mir::types::MirStructType::get_with_full_layout(
+                ctx,
+                "FnPtrTarget".to_string(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                0,
+                0,
+            )
+            .into();
+            Ok(dialect_mir::types::MirPtrType::get_generic(ctx, target, false).into())
+        }
+        // Zero-sized function-item type. Appears only type-level (e.g. dead
+        // panic/formatting branches pulled in by `assert!` inside core fns like
+        // `f32::clamp`); never materialised as a value.
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(fn_def, _)) => {
+            let name = format!("FnDef_{:?}", fn_def.def_id());
+            Ok(dialect_mir::types::MirStructType::get_with_full_layout(
+                ctx,
+                name,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                0,
+                0,
+            )
+            .into())
         }
         _ => input_err_noloc!(TranslationErr::unsupported(format!(
             "Type translation not yet implemented for: {:?}",
