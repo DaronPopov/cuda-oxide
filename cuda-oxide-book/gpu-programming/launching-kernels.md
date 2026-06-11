@@ -340,6 +340,54 @@ Cluster launch requires **Hopper (sm_90)** or newer. The maximum cluster size is
 typically 16 blocks. Use `cargo oxide build --arch sm_90` to target Hopper.
 :::
 
+## Cooperative launch
+
+Grid-wide barriers (`cuda_device::grid::sync()` or `this_grid().sync()`) only
+work when every block in the grid is resident on the device at the same time.
+A **cooperative launch** asks the driver to guarantee exactly that; without
+it, blocks that have not been scheduled yet can never reach the barrier and
+the kernel deadlocks.
+
+On the typed `#[cuda_module]` path, mark the kernel with
+`#[cooperative_launch]`. Every generated launch method (sync, async, and
+owned-async) then submits through `cuLaunchKernelEx` with the
+`CU_LAUNCH_ATTRIBUTE_COOPERATIVE` attribute set:
+
+```rust
+use cuda_device::{cooperative_launch, grid, kernel, DisjointSlice};
+
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    #[cooperative_launch]
+    pub fn grid_sync_kernel(mut out: DisjointSlice<u32>) {
+        // ... per-block work ...
+        grid::sync();
+        // ... grid-wide post-barrier work ...
+    }
+}
+
+let module = kernels::load(&ctx)?;
+module.grid_sync_kernel(&stream, config, &mut out_dev)?; // cooperative launch
+```
+
+Unlike `#[cluster_launch]`, the attribute changes nothing in the PTX; it only
+changes how the host submits the launch. The two attributes may be combined
+on one kernel, in which case both launch attributes go into the same
+`cuLaunchKernelEx` call.
+
+The legacy `cuda_launch!` macro offers the same behaviour through its
+`cooperative: true` field.
+
+:::{tip}
+The whole grid must fit on the device in a single wave, or the driver rejects
+the launch with `CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE`. Size the grid from
+`cuOccupancyMaxActiveBlocksPerMultiprocessor` (blocks per SM × SM count) when
+in doubt.
+:::
+
 ## Common launch errors
 
 | Error                                  | Likely cause                                           | Fix                                                                  |
