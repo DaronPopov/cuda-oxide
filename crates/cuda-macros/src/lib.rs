@@ -51,7 +51,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use reserved_oxide_symbols::{
     DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, KERNEL_SCOPE_LOCAL,
-    RESERVED_ROOT, constant_symbol, kernel_symbol,
+    RESERVED_ROOT, artifact_anchor_symbol, constant_symbol, kernel_symbol,
 };
 use syn::{
     Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ForeignItem, GenericArgument, GenericParam,
@@ -237,6 +237,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
         }
     });
 
+    let artifact_anchor_statements = cuda_module_artifact_anchor_statements(&kernels)?;
     let constant_fields = constants.iter().map(generate_cuda_module_constant_field);
     let constant_initializers = constants
         .iter()
@@ -307,6 +308,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
                 ctx: &::std::sync::Arc<::cuda_core::CudaContext>,
                 name: &str,
             ) -> ::core::result::Result<LoadedModule, ::cuda_host::EmbeddedModuleError> {
+                #artifact_anchor_statements
                 let module = ::cuda_host::load_embedded_module(ctx, name)?;
                 from_module(module).map_err(::cuda_host::EmbeddedModuleError::Driver)
             }
@@ -370,6 +372,97 @@ fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKern
         });
     }
     Ok(kernels)
+}
+
+/// Generate the statements that pin this crate's embedded device artifact
+/// into the final binary.
+///
+/// The codegen backend stores each crate's compiled device code (PTX,
+/// cubin, NVVM IR, or LTOIR) in a `.oxart` data section of a small extra
+/// object file. When the crate that holds the `#[cuda_module]` is a
+/// *library*, that object becomes one member of the crate's `.rlib`
+/// archive, and linkers only extract an archive member when it defines a
+/// symbol that some already-linked object references. The backend defines
+/// a global anchor symbol inside the artifact object for exactly this
+/// purpose; here we emit the matching reference. Reading the anchor's
+/// address through `black_box` inside `load_named()` means that any
+/// program calling `load()` carries an undefined reference to the anchor,
+/// which forces the linker to pull the artifact member out of the rlib.
+/// Without this handshake the bundle was silently dropped and `load()`
+/// failed at runtime with `ModuleNotFound` (issue #72).
+///
+/// Both sides derive the symbol name from `CARGO_PKG_NAME` and
+/// `CARGO_PKG_VERSION`: this proc macro reads them while rustc compiles
+/// the crate, and the codegen backend reads them inside the same rustc
+/// process, so the names always agree under cargo.
+///
+/// The reference is only emitted when the module is guaranteed to produce
+/// an artifact for this crate. Generic kernels are monomorphized (and
+/// their PTX embedded) in the *consuming* crate, so a module with only
+/// generic kernels yields no artifact here, and an anchor reference would
+/// be an undefined-symbol link error. The same reasoning extends to
+/// `#[cfg]`-gated kernels: the anchor is guarded by the disjunction of
+/// the kernels' cfg conditions so it is only referenced when at least one
+/// concrete kernel is actually compiled.
+fn cuda_module_artifact_anchor_statements(
+    kernels: &[CudaModuleKernel],
+) -> syn::Result<TokenStream2> {
+    let (Ok(package_name), Ok(package_version)) = (
+        std::env::var("CARGO_PKG_NAME"),
+        std::env::var("CARGO_PKG_VERSION"),
+    ) else {
+        // Not built by cargo (e.g. a raw rustc invocation): the backend
+        // falls back to crate-name-based bundle naming and we cannot
+        // reproduce it exactly, so skip the anchor rather than risk an
+        // undefined symbol.
+        return Ok(TokenStream2::new());
+    };
+
+    let non_generic: Vec<&CudaModuleKernel> =
+        kernels.iter().filter(|kernel| !kernel.is_generic).collect();
+    if non_generic.is_empty() {
+        return Ok(TokenStream2::new());
+    }
+
+    let cfg_guard = if non_generic.iter().any(|kernel| kernel.cfg_attrs.is_empty()) {
+        // At least one concrete kernel is compiled unconditionally, so the
+        // artifact object always exists: no guard needed.
+        None
+    } else {
+        // Every concrete kernel is cfg-gated. Reference the anchor only
+        // when at least one of them is enabled. A kernel with several cfg
+        // attributes requires all of them, hence all(...) per kernel
+        // joined under any(...).
+        let alternatives = non_generic
+            .iter()
+            .map(|kernel| {
+                let predicates = kernel
+                    .cfg_attrs
+                    .iter()
+                    .map(|attr| attr.parse_args::<TokenStream2>())
+                    .collect::<syn::Result<Vec<_>>>()?;
+                Ok(quote! { all( #(#predicates),* ) })
+            })
+            .collect::<syn::Result<Vec<_>>>()?;
+        Some(quote! { #[cfg(any( #(#alternatives),* ))] })
+    };
+
+    let anchor = artifact_anchor_symbol(&package_name, &package_version);
+    let anchor_name = LitStr::new(&anchor, proc_macro2::Span::call_site());
+    Ok(quote! {
+        // Keep-alive handshake with the codegen backend: see the macro
+        // crate's `cuda_module_artifact_anchor_statements` for details.
+        #cfg_guard
+        let _artifact_anchor: *const ::core::primitive::u8 = {
+            unsafe extern "C" {
+                #[link_name = #anchor_name]
+                static CUDA_OXIDE_BUNDLE_ANCHOR: ::core::primitive::u8;
+            }
+            ::std::hint::black_box(unsafe {
+                ::core::ptr::addr_of!(CUDA_OXIDE_BUNDLE_ANCHOR)
+            })
+        };
+    })
 }
 
 /// A `#[constant]` static collected from a `#[cuda_module]` body.
