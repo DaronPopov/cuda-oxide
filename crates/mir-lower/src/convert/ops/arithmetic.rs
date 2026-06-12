@@ -72,7 +72,9 @@ fn is_float_type(ctx: &Context, val: Value) -> bool {
 ///
 /// Uses `operands_info` to read the *pre-conversion* MIR type (which preserves
 /// Rust's signedness). After DialectConversion, the live operand type is already
-/// signless. Pointer types are treated as unsigned.
+/// signless. Pointer types are treated as unsigned. Operands with no conversion
+/// history (types that were never convertible, today only signless i1 bools)
+/// fall back to the live type's signedness.
 fn is_signed_int_op(
     ctx: &Context,
     op: Ptr<Operation>,
@@ -87,13 +89,17 @@ fn is_signed_int_op(
     {
         Ok(false)
     } else {
-        // Pre-conversion MIR type wasn't tracked for this operand (can happen
-        // for booleans / values produced inside short-circuit `||`/`&&` or
-        // already-converted operands). Fall back to the live operand type: an
-        // integer (signless post-conversion) or pointer is treated as unsigned.
+        // No conversion history exists for this operand: its type was never
+        // convertible, so DialectConversion recorded nothing for it. Today
+        // that is only signless i1 bools (e.g. a phi produced by
+        // short-circuit `||`/`&&`). Fall back to the live operand type and
+        // honor its signedness: signless lowers as unsigned, and pointers
+        // are always unsigned.
         let live = operand.get_type(ctx);
         let live_ref = live.deref(ctx);
-        if live_ref.is::<IntegerType>() || live_ref.is::<dialect_mir::types::MirPtrType>() {
+        if let Some(int_ty) = live_ref.downcast_ref::<IntegerType>() {
+            Ok(int_ty.signedness() == Signedness::Signed)
+        } else if live_ref.is::<dialect_mir::types::MirPtrType>() {
             Ok(false)
         } else {
             pliron::input_err!(
