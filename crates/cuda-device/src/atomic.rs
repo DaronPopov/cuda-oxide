@@ -548,6 +548,11 @@ define_integer_atomic! {
 }
 
 define_float_atomic! {
+    /// 16-bit float atomic, **system scope** (`.sys`).
+    pub struct SystemAtomicF16(f16);
+}
+
+define_float_atomic! {
     /// 32-bit float atomic, **system scope** (`.sys`).
     pub struct SystemAtomicF32(f32);
 }

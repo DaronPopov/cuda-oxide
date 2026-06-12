@@ -8,7 +8,7 @@
 #![feature(f16)]
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_device::atomic::{AtomicOrdering, BlockAtomicF16, DeviceAtomicF16};
+use cuda_device::atomic::{AtomicOrdering, BlockAtomicF16, DeviceAtomicF16, SystemAtomicF16};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -52,6 +52,16 @@ mod kernels {
             *out_elem = prev;
         }
     }
+
+    #[kernel]
+    pub fn system_add_f16(counter: &[f16], mut old: DisjointSlice<f16>) {
+        let gid = thread::index_1d();
+        let cell = unsafe { &*(counter.as_ptr() as *const SystemAtomicF16) };
+        let prev = cell.fetch_add(1.0f16, AtomicOrdering::Relaxed);
+        if let Some(out_elem) = old.get_mut(gid) {
+            *out_elem = prev;
+        }
+    }
 }
 
 fn main() {
@@ -64,6 +74,7 @@ fn main() {
     run_device_hist(&module, &stream, 31, 16);
     run_device_hist(&module, &stream, 4096, 16);
     run_device_sub(&module, &stream, 256);
+    run_system_add(&module, &stream, 256);
     run_block_hist(&module, &stream, 4, 64);
 
     println!("\nSUCCESS: all f16 atomic checks passed");
@@ -123,6 +134,31 @@ fn run_device_sub(module: &kernels::LoadedModule, stream: &cuda_core::CudaStream
     let final_count = counter.to_host_vec(stream).unwrap()[0].to_bits();
     check_slice("fetch_sub final count", &[final_count], &[0.0f16.to_bits()]);
     check_old_range("fetch_sub old values", &old.to_host_vec(stream).unwrap(), 1, n);
+}
+
+fn run_system_add(module: &kernels::LoadedModule, stream: &cuda_core::CudaStream, n: u32) {
+    println!("--- SystemAtomicF16 fetch_add: n={n} ---");
+
+    let counter = DeviceBuffer::<f16>::zeroed(stream, 1).unwrap();
+    let mut old = DeviceBuffer::<f16>::zeroed(stream, n as usize).unwrap();
+
+    module
+        .system_add_f16(stream, LaunchConfig::for_num_elems(n), &counter, &mut old)
+        .expect("Kernel launch failed");
+
+    stream.synchronize().unwrap();
+
+    let final_count = counter.to_host_vec(stream).unwrap()[0].to_bits();
+    check_slice(
+        "system fetch_add final count",
+        &[final_count],
+        &[(n as f16).to_bits()],
+    );
+    check_old_sequence(
+        "system fetch_add old values",
+        &old.to_host_vec(stream).unwrap(),
+        n,
+    );
 }
 
 fn run_block_hist(
