@@ -5,15 +5,18 @@
 
 //! Smoke test for `f32::cbrt` / `f64::cbrt` → libdevice lowering.
 //!
-//! `f32::cbrt` / `f64::cbrt` lower to `std::sys::cmath::cbrtf` / `cbrt`
-//! shims in MIR. Before this example was added, cuda-oxide had no handler
-//! for those shims and the calls would fall out of the pipeline as an
-//! unresolved symbol. After the matching entries were added to:
+//! On the pinned toolchain, `f32::cbrt` / `f64::cbrt` inline down to the
+//! `core::num::imp::libm::cbrtf` / `cbrt` extern declarations, so that is
+//! the call shape device codegen sees in MIR (older toolchains routed the
+//! same calls through `std::sys::cmath` shims; the importer recognizes
+//! both spellings). Before this example was added, cuda-oxide had no
+//! handler for those paths and the calls would fall out of the pipeline
+//! as an unresolved symbol. After the matching entries were added to:
 //!
 //! * `dialect-mir::rust_intrinsics`
 //! * `mir-importer::translator::terminator::intrinsics::float_math`
 //! * `mir-lower::convert::ops::call`
-//! * `rustc-codegen-cuda::collector` (cmath shim allowlist)
+//! * `rustc-codegen-cuda::collector` (std cmath shim allowlist)
 //!
 //! the calls lower to libdevice `__nv_cbrtf` / `__nv_cbrt`, which the
 //! auto-detected libNVVM + nvJitLink pipeline resolves transparently.
@@ -21,7 +24,7 @@
 //! The host computes the same expression with stdlib `f{32,64}::cbrt` and
 //! compares within a 2-ULP tolerance (matching the bound `math_atan` and
 //! `primitive_stress` use for the other libdevice transcendentals). Inputs
-//! deliberately span negative, zero, small and large magnitudes — unlike
+//! deliberately span negative, zero, small and large magnitudes: unlike
 //! `sqrt`, `cbrt` is defined for negative operands, so the sign-cross cases
 //! are the interesting part of the check.
 //!
