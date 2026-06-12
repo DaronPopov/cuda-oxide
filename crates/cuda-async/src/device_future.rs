@@ -206,15 +206,20 @@ impl<T: Send, DO: DeviceOperation<Output = T>> Unpin for DeviceFuture<T, DO> {}
 
 impl<T: Send, DO: DeviceOperation<Output = T>> Drop for DeviceFuture<T, DO> {
     fn drop(&mut self) {
-        self.cleanup_executing_result_with(|| {
-            let ctx = self.execution_context.as_ref().ok_or_else(|| {
+        // Clone the stream handle out of `execution_context` first: the
+        // cleanup helper takes `&mut self`, so the closure must not borrow
+        // `self` (E0502).
+        let stream = self
+            .execution_context
+            .as_ref()
+            .map(|ctx| Arc::clone(ctx.get_cuda_stream()));
+        self.cleanup_executing_result_with(move || {
+            let stream = stream.ok_or_else(|| {
                 DeviceError::Internal(
                     "Cannot clean up an in-flight future without an execution context.".to_string(),
                 )
             })?;
-            ctx.get_cuda_stream()
-                .synchronize()
-                .map_err(DeviceError::Driver)
+            stream.synchronize().map_err(DeviceError::Driver)
         });
     }
 }
