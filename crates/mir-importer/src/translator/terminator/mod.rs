@@ -1450,6 +1450,20 @@ fn translate_closure_call(
 }
 
 /// True only when the rust-call receiver is itself a closure.
+///
+/// We type the operand's base local (or constant) and ignore any
+/// `place.projection`, and we peel at most one reference. Both are safe for
+/// the rust-call receiver specifically: rustc lowers a closure-trait call
+/// (`Fn::call` / `FnMut::call_mut` / `FnOnce::call_once`) so that the receiver
+/// argument is the closure passed by value, or a single `&`/`&mut` borrow of
+/// it, materialized into its own temporary local, never an in-place projection
+/// of a larger aggregate and never behind multiple references. So a closure
+/// reached through a field (`(self.f)(x)`) still arrives here as a base local
+/// of type `&{closure}`, and one `Ref` peel plus a base-local type check covers
+/// every genuine closure-call shape. A wrapper ADT that merely carries a
+/// closure in its generic substitutions (the case this guard exists to reject)
+/// has a non-closure receiver type and is correctly left on the ordinary call
+/// path with its rust-call tuple intact.
 fn receiver_is_closure(receiver: &mir::Operand, body: &mir::Body) -> bool {
     let ty = match receiver {
         mir::Operand::Copy(place) | mir::Operand::Move(place) => {

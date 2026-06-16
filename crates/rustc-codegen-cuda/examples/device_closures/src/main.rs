@@ -233,6 +233,42 @@ mod kernels {
             *out_elem = wrapper.call((idx_raw as u32,));
         }
     }
+
+    /// Genuine closure call whose receiver is reached through a struct field
+    /// (`(holder.f)(x)`). The tightened `receiver_is_closure` guard must still
+    /// unpack the rust-call tuple here: rustc materializes the `&{closure}`
+    /// receiver into its own temporary local, so the base-local type check
+    /// sees a closure even though the closure lives in a field.
+    #[kernel]
+    pub fn test_closure_field_projection(factor: u32, mut out: DisjointSlice<u32>) {
+        struct Holder<F> {
+            f: F,
+        }
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let holder = Holder {
+                f: |x: u32| x * factor,
+            };
+            *out_elem = (holder.f)(idx_raw as u32);
+        }
+    }
+
+    /// Genuine closure call through two reference levels (`(**rr)(x)`). The
+    /// guard peels a single reference; this still classifies as a closure
+    /// because rustc resolves the receiver to one `&{closure}` borrow at the
+    /// call site regardless of the source-level double indirection.
+    #[kernel]
+    pub fn test_closure_double_ref(factor: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let closure = |x: u32| x * factor;
+            let r = &closure;
+            let rr = &r;
+            *out_elem = (**rr)(idx_raw as u32);
+        }
+    }
 }
 
 // =============================================================================
@@ -510,6 +546,60 @@ fn main() {
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = (0..N).map(|i| (i as u32) * factor + 1).collect();
+
+        println!("  Output:   {:?}", out);
+        println!("  Expected: {:?}", expected);
+        assert_eq!(out, expected);
+        println!("  ✓ PASSED\n");
+    }
+
+    // =========================================================================
+    // Test 10: genuine closure called through a struct field projection
+    // =========================================================================
+    println!("Test 10: closure via field projection");
+    {
+        const N: usize = 8;
+        let factor: u32 = 5;
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
+
+        module
+            .test_closure_field_projection(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
+
+        let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
+        let expected: Vec<u32> = (0..N).map(|i| (i as u32) * factor).collect();
+
+        println!("  Output:   {:?}", out);
+        println!("  Expected: {:?}", expected);
+        assert_eq!(out, expected);
+        println!("  ✓ PASSED\n");
+    }
+
+    // =========================================================================
+    // Test 11: genuine closure called through a double reference
+    // =========================================================================
+    println!("Test 11: closure via double reference");
+    {
+        const N: usize = 8;
+        let factor: u32 = 7;
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
+
+        module
+            .test_closure_double_ref(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
+
+        let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
+        let expected: Vec<u32> = (0..N).map(|i| (i as u32) * factor).collect();
 
         println!("  Output:   {:?}", out);
         println!("  Expected: {:?}", expected);
