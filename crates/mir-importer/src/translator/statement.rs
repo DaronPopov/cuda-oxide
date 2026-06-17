@@ -639,70 +639,26 @@ pub fn translate_statement(
                         mir::ProjectionElem::Index(_outer_index_local),
                         mir::ProjectionElem::Index(_inner_index_local),
                     ) => {
-                        // `_local[i][j] = value` for nested arrays. The generic
-                        // address walker already handles chained runtime indexes;
-                        // use it here so 2-level projection stores do not reject
-                        // before reaching the N-projection fallback below.
-                        let mut current_prev = prev_op;
-                        if let Some(rvalue_op) = rvalue_op_opt {
-                            if let Some(prev) = last_inserted {
-                                rvalue_op.insert_after(ctx, prev);
-                                current_prev = Some(rvalue_op);
-                            } else if let Some(prev) = prev_op {
-                                rvalue_op.insert_after(ctx, prev);
-                                current_prev = Some(rvalue_op);
-                            } else {
-                                rvalue_op.insert_at_front(block_ptr, ctx);
-                                current_prev = Some(rvalue_op);
-                            }
-                        } else if let Some(prev) = last_inserted {
-                            current_prev = Some(prev);
-                        }
-
-                        let Some(slot) = value_map.get_slot(place.local) else {
-                            return input_err!(
-                                loc,
-                                TranslationErr::unsupported(format!(
-                                    "Local {} has no alloca slot for nested-index assignment",
-                                    Into::<usize>::into(place.local)
-                                ))
-                            );
-                        };
-                        let is_mutable = pointer_is_mutable(ctx, slot);
-
-                        match rvalue::translate_place_address(
+                        // `_local[i][j] = value` for nested arrays. The shared
+                        // walk-and-store path already handles chained runtime
+                        // indexes, so delegate to it instead of re-deriving the
+                        // address here. That keeps this 2-level arm from drifting
+                        // from the (Deref, Index) arm above and the N-projection
+                        // fallback below, which use the same helper. The store
+                        // target of an assignment is always a mutable place, so
+                        // the helper's mutable-address request is correct here.
+                        store_through_place_address(
                             ctx,
                             body,
                             value_map,
                             place,
-                            is_mutable,
+                            result_value,
+                            rvalue_op_opt,
+                            last_inserted,
+                            prev_op,
                             block_ptr,
-                            current_prev,
-                            loc.clone(),
-                        )? {
-                            Some((dest_ptr, prev_after_addr)) => {
-                                let store_op = Operation::new(
-                                    ctx,
-                                    MirStoreOp::get_concrete_op_info(),
-                                    vec![],
-                                    vec![dest_ptr, result_value],
-                                    vec![],
-                                    0,
-                                );
-                                store_op.deref_mut(ctx).set_loc(loc);
-                                match prev_after_addr {
-                                    Some(p) => store_op.insert_after(ctx, p),
-                                    None => store_op.insert_at_front(block_ptr, ctx),
-                                }
-                                Ok(Some(store_op))
-                            }
-                            None => input_err!(
-                                loc,
-                                TranslationErr::unsupported(
-                                    "Nested-index assignment could not be lowered to an address"
-                                )
-                            ),
-                        }
+                            loc,
+                        )
                     }
                     _ => input_err!(
                         loc,
