@@ -1667,8 +1667,15 @@ fn emit_typed_swap(
         );
     }
 
-    let (ptr_x, last) =
-        rvalue::translate_operand(ctx, body, &args[0], value_map, block_ptr, prev_op, loc.clone())?;
+    let (ptr_x, last) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
     let (ptr_y, last) =
         rvalue::translate_operand(ctx, body, &args[1], value_map, block_ptr, last, loc.clone())?;
 
@@ -1760,7 +1767,13 @@ fn emit_typed_swap(
         .unwrap_or(unit_op);
 
     if let Some(target_idx) = target {
-        Ok(helpers::emit_goto(ctx, *target_idx, goto_prev, block_map, loc))
+        Ok(helpers::emit_goto(
+            ctx,
+            *target_idx,
+            goto_prev,
+            block_map,
+            loc,
+        ))
     } else {
         input_err!(
             loc,
