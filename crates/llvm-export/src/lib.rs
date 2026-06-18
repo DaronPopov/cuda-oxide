@@ -129,8 +129,8 @@ pub mod attributes {
     }
 }
 
-/// LLVM ops: re-exported from pliron-llvm, plus the builtin `ConstantOp` and a
-/// convergent inline-asm constructor.
+/// LLVM ops: re-exported from pliron-llvm, plus the builtin `ConstantOp` and
+/// the `AsmKind`-tagged inline-asm builder.
 pub mod ops {
     pub use pliron_llvm::ops::*;
 
@@ -155,35 +155,108 @@ pub mod ops {
         r#type::TypeObj,
         value::Value,
     };
-    use pliron_derive::pliron_op;
+    use pliron_derive::{pliron_attr, pliron_op};
     use pliron_llvm::attributes::AlignmentAttr;
     pub use pliron_llvm::ops::{GlobalOp, InlineAsmOp};
 
-    /// Convergent inline-asm constructor re-homed from the pre-migration local
-    /// op. Upstream `InlineAsmOp::new` takes a trailing `convergent: bool`;
-    /// this keeps the `new_convergent(...)` call shape used across mir-lower.
+    /// Inline asm semantics for LLVM optimization hints.
+    ///
+    /// This is the complete classification: two orthogonal axes (convergent ×
+    /// side-effects) produce exactly four variants, all valid for GPU inline
+    /// asm. No further axes are needed because:
+    ///
+    /// - **Memory effects** (`nomem`/`readonly`/`readwrite`) are unnecessary:
+    ///   cuda-oxide's inline asm is either a pure register-to-register
+    ///   conversion or a full side-effecting op. Fine-grained memory
+    ///   classification would only help if we lowered loads/stores through
+    ///   inline asm, which we don't — those go through proper LLVM ops.
+    ///
+    /// - **`noreturn`/`may_unwind`** don't apply: PTX inline asm always
+    ///   returns and never unwinds.
+    ///
+    /// - **`preserves_flags`/`nostack`** are CPU concepts with no PTX
+    ///   equivalent.
+    #[pliron_attr(name = "llvm.asm_kind", format, verifier = "succ")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum AsmKind {
+        /// Convergent + side effects. Warp-synchronous operations that
+        /// synchronize threads or write memory: `bar.sync`, `mma.sync`,
+        /// `wgmma`, `tcgen05`, `cp.async`.
+        Convergent,
+        /// Convergent, no side effects. Warp-collective operations whose
+        /// result depends on which threads are active but that produce no
+        /// observable effects beyond their register output: `shfl.sync`,
+        /// `vote.sync`, `match.sync`.
+        ConvergentPure,
+        /// Side effects, not convergent. Non-collective operations that
+        /// modify memory or hardware state: `st.global` via asm, hardware
+        /// timer reads.
+        SideEffect,
+        /// No side effects, not convergent. Pure register-to-register data
+        /// conversions: `cvt.rn.f16x2.f32`, `cvt.rn.bf16x2.f32`, `prmt`.
+        Pure,
+    }
+
+    /// Op-attribute key for the inline-asm kind tag.
+    const ASM_KIND_KEY: &str = "cuda_oxide_asm_kind";
+
+    /// Builder extension for `InlineAsmOp` that tags the op with an [`AsmKind`].
     pub trait InlineAsmOpExt {
-        /// Build a convergent `InlineAsmOp` (use a void result type for asm
-        /// with no result value).
-        fn new_convergent(
+        /// Build an `InlineAsmOp` tagged with the given [`AsmKind`].
+        fn build(
             ctx: &mut Context,
             result_ty: Ptr<TypeObj>,
             inputs: Vec<Value>,
             asm_template: &str,
             constraints: &str,
+            kind: AsmKind,
         ) -> Self;
     }
 
     impl InlineAsmOpExt for InlineAsmOp {
-        fn new_convergent(
+        fn build(
             ctx: &mut Context,
             result_ty: Ptr<TypeObj>,
             inputs: Vec<Value>,
             asm_template: &str,
             constraints: &str,
+            kind: AsmKind,
         ) -> Self {
-            InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, true)
+            let convergent = matches!(kind, AsmKind::Convergent | AsmKind::ConvergentPure);
+            let op = InlineAsmOp::new(
+                ctx,
+                result_ty,
+                inputs,
+                asm_template,
+                constraints,
+                convergent,
+            );
+            let key = Identifier::try_new(ASM_KIND_KEY.to_string()).expect("valid identifier");
+            op.get_operation().deref_mut(ctx).attributes.set(key, kind);
+            op
         }
+    }
+
+    /// Query the [`AsmKind`] stored on an `InlineAsmOp`, if present.
+    ///
+    /// Returns `None` for ops that were not built with [`InlineAsmOpExt::build`]
+    /// (e.g., user-written `ptx_asm!` ops, which carry separate sideeffect /
+    /// convergent attributes instead).
+    pub fn asm_kind_opt(ctx: &Context, op: &InlineAsmOp) -> Option<AsmKind> {
+        let key = Identifier::try_new(ASM_KIND_KEY.to_string()).expect("valid identifier");
+        op.get_operation()
+            .deref(ctx)
+            .attributes
+            .get::<AsmKind>(&key)
+            .copied()
+    }
+
+    /// Query the [`AsmKind`] stored on an `InlineAsmOp`.
+    ///
+    /// Returns `AsmKind::SideEffect` if the attribute is missing (safe default:
+    /// assume side effects).
+    pub fn asm_kind(ctx: &Context, op: &InlineAsmOp) -> AsmKind {
+        asm_kind_opt(ctx, op).unwrap_or(AsmKind::SideEffect)
     }
 
     /// Op-attribute key for a `GlobalOp`'s explicit alignment.
@@ -1034,4 +1107,64 @@ pub fn fp16_attr_from_bits(bits: u16) -> FPHalfAttr {
 /// Extract the raw 16-bit IEEE half pattern from an `FPHalfAttr`.
 pub fn fp16_attr_to_bits(attr: &FPHalfAttr) -> u16 {
     attr.0.to_bits() as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ops::{AsmKind, InlineAsmOp, InlineAsmOpExt, asm_kind};
+    use super::types::VoidType;
+    use pliron::context::Context;
+
+    #[test]
+    fn asm_kind_convergent_round_trips() {
+        let mut ctx = Context::new();
+        let void_ty = VoidType::get(&ctx);
+        let op = InlineAsmOp::build(
+            &mut ctx,
+            void_ty.into(),
+            vec![],
+            "bar.sync 0;",
+            "",
+            AsmKind::Convergent,
+        );
+        assert_eq!(asm_kind(&ctx, &op), AsmKind::Convergent);
+    }
+
+    #[test]
+    fn asm_kind_pure_round_trips() {
+        let mut ctx = Context::new();
+        let void_ty = VoidType::get(&ctx);
+        let op = InlineAsmOp::build(&mut ctx, void_ty.into(), vec![], "nop;", "", AsmKind::Pure);
+        assert_eq!(asm_kind(&ctx, &op), AsmKind::Pure);
+    }
+
+    #[test]
+    fn asm_kind_side_effect_round_trips() {
+        let mut ctx = Context::new();
+        let void_ty = VoidType::get(&ctx);
+        let op = InlineAsmOp::build(
+            &mut ctx,
+            void_ty.into(),
+            vec![],
+            "st.shared [%0], %1;",
+            "r,r",
+            AsmKind::SideEffect,
+        );
+        assert_eq!(asm_kind(&ctx, &op), AsmKind::SideEffect);
+    }
+
+    #[test]
+    fn asm_kind_convergent_pure_round_trips() {
+        let mut ctx = Context::new();
+        let void_ty = VoidType::get(&ctx);
+        let op = InlineAsmOp::build(
+            &mut ctx,
+            void_ty.into(),
+            vec![],
+            "shfl.sync.bfly.b32 $0, $1, $2, $3;",
+            "=r,r,r,r",
+            AsmKind::ConvergentPure,
+        );
+        assert_eq!(asm_kind(&ctx, &op), AsmKind::ConvergentPure);
+    }
 }

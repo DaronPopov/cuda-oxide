@@ -13,7 +13,7 @@ use pliron::r#type::Typed;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        attributes::{BoolAttr, FPDoubleAttr, FPSingleAttr, IntegerAttr, StringAttr},
+        attributes::{FPDoubleAttr, FPSingleAttr, IntegerAttr, StringAttr},
         op_interfaces::{CallOpCallable, CallOpInterface},
     },
     context::Ptr,
@@ -980,8 +980,25 @@ impl<'a> ModuleExportState<'a> {
         let op_ref = op.get_operation().deref(self.ctx);
         let asm_template = read_string_attr(op.get_attr_inline_asm_template(self.ctx));
         let constraints = read_string_attr(op.get_attr_inline_asm_constraints(self.ctx));
-        let sideeffect = ops::inline_asm_sideeffect(self.ctx, op.get_operation());
-        let is_convergent = read_bool_attr(op.get_attr_inline_asm_convergent(self.ctx));
+        // NVVM-dialect ops carry an AsmKind tag (set by InlineAsmOpExt::build).
+        // User-written ptx_asm! ops carry separate sideeffect/convergent attrs.
+        // Resolve both into (has_sideeffect, is_convergent).
+        let kind = ops::asm_kind_opt(self.ctx, op);
+        let (has_sideeffect, is_convergent) = match kind {
+            Some(ops::AsmKind::Convergent) => (true, true),
+            Some(ops::AsmKind::ConvergentPure) => (false, true),
+            Some(ops::AsmKind::SideEffect) => (true, false),
+            Some(ops::AsmKind::Pure) => (false, false),
+            None => {
+                // ptx_asm! path: read the individual attributes.
+                let se = ops::inline_asm_sideeffect(self.ctx, op.get_operation());
+                let cv = op
+                    .get_attr_inline_asm_convergent(self.ctx)
+                    .map(|a| bool::from((*a).clone()))
+                    .unwrap_or(false);
+                (se, cv)
+            }
+        };
 
         // pliron-llvm always stores a single result slot (a void result for
         // no-value asm), so decide void vs valued by the result *type*, not the
@@ -997,7 +1014,7 @@ impl<'a> ModuleExportState<'a> {
         }
 
         write!(output, " asm").unwrap();
-        if sideeffect {
+        if has_sideeffect {
             write!(output, " sideeffect").unwrap();
         }
         let asm_template = format_string_literal(&asm_template);
@@ -1277,11 +1294,6 @@ fn ptr_qualifier(addrspace: u32) -> String {
 /// Read an optional `StringAttr` to an owned `String` (absent → empty).
 fn read_string_attr(attr: Option<Ref<StringAttr>>) -> String {
     attr.map(|s| String::from((*s).clone())).unwrap_or_default()
-}
-
-/// Read an optional `BoolAttr` to a `bool` (absent → false).
-fn read_bool_attr(attr: Option<Ref<BoolAttr>>) -> bool {
-    attr.map(|b| bool::from((*b).clone())).unwrap_or(false)
 }
 
 /// LLVM mnemonic for an atomic ordering. Ordering is always present on atomic
