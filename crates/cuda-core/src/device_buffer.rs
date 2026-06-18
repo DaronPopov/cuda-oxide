@@ -213,11 +213,22 @@ impl<T> DeviceBuffer<T> {
     ///   freed with the synchronous `cuMemFree` on drop. Do not pass a
     ///   stream-ordered (`cuMemAllocAsync`) pointer here.
     pub unsafe fn from_raw_parts(ptr: CUdeviceptr, len: usize, ctx: Arc<CudaContext>) -> Self {
+        // SAFETY: `from_raw_parts` has the same raw-allocation safety contract,
+        // with no stream-ordered deallocation metadata attached.
+        unsafe { Self::from_raw_parts_with_dealloc_stream(ptr, len, ctx, None) }
+    }
+
+    unsafe fn from_raw_parts_with_dealloc_stream(
+        ptr: CUdeviceptr,
+        len: usize,
+        ctx: Arc<CudaContext>,
+        dealloc_stream: Option<Arc<CudaStream>>,
+    ) -> Self {
         Self {
             ptr,
             len,
             ctx,
-            dealloc_stream: None,
+            dealloc_stream,
             _marker: PhantomData,
         }
     }
@@ -225,20 +236,33 @@ impl<T> DeviceBuffer<T> {
     /// Consumes the buffer and returns the raw parts without freeing.
     ///
     /// The caller is responsible for eventually freeing `ptr` with the
-    /// allocator that matches how it was created.
+    /// allocator that matches how it was created. For stream-ordered
+    /// allocations, this does not return the stored deallocation stream; the
+    /// caller must already know which stream to use for `cuMemFreeAsync`.
     pub fn into_raw_parts(self) -> (CUdeviceptr, usize, Arc<CudaContext>) {
+        let (ptr, len, ctx, _dealloc_stream) = self.into_all_raw_parts();
+        (ptr, len, ctx)
+    }
+
+    fn into_all_raw_parts(
+        self,
+    ) -> (
+        CUdeviceptr,
+        usize,
+        Arc<CudaContext>,
+        Option<Arc<CudaStream>>,
+    ) {
         // Suppress the buffer's `Drop` (which would free `ptr`) while still
-        // dropping the heap-owned fields (`ctx` is moved out and returned;
-        // `dealloc_stream`'s `Arc` is dropped here so its strong count is not
-        // leaked).
+        // moving out the heap-owned fields. Callers that do not need
+        // `dealloc_stream` can drop it after this helper returns.
         let this = std::mem::ManuallyDrop::new(self);
         let ptr = this.ptr;
         let len = this.len;
         // SAFETY: `this` is `ManuallyDrop` and is never used again, so reading
         // out its non-`Copy` fields takes ownership without a double drop.
         let ctx = unsafe { std::ptr::read(&this.ctx) };
-        let _dealloc_stream = unsafe { std::ptr::read(&this.dealloc_stream) };
-        (ptr, len, ctx)
+        let dealloc_stream = unsafe { std::ptr::read(&this.dealloc_stream) };
+        (ptr, len, ctx, dealloc_stream)
     }
 
     /// Reinterpret the element type of this buffer as `A`.
@@ -263,13 +287,16 @@ impl<T> DeviceBuffer<T> {
             std::mem::align_of::<T>(),
             "cast_elem requires the same element alignment"
         );
-        let (ptr, len, ctx) = self.into_raw_parts();
+        let (ptr, len, ctx, dealloc_stream) = self.into_all_raw_parts();
         // SAFETY: `ptr` came from a valid `DeviceBuffer<T>` allocation of `len`
         // elements; `A` has identical size and alignment, so the same allocation
         // is a valid `DeviceBuffer<A>` of the same length and the same byte
         // extent. Ownership transfers; the original buffer's `Drop` is
-        // suppressed by `into_raw_parts`.
-        unsafe { DeviceBuffer::<A>::from_raw_parts(ptr, len, ctx) }
+        // suppressed by `into_all_raw_parts`, and the allocation metadata is
+        // preserved for the new element type.
+        unsafe {
+            DeviceBuffer::<A>::from_raw_parts_with_dealloc_stream(ptr, len, ctx, dealloc_stream)
+        }
     }
 }
 

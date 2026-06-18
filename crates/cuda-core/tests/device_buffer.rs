@@ -131,3 +131,21 @@ fn uninitialized_async_implicit_drop_is_stream_ordered() {
     }
     stream.synchronize().expect("stream sync failed");
 }
+
+#[test]
+fn uninitialized_async_cast_elem_implicit_drop_is_stream_ordered() {
+    let ctx = CudaContext::new(0).expect("failed to create CUDA context");
+    let stream = ctx.new_stream().expect("failed to create CUDA stream");
+
+    let n = 1 << 20; // 4 MiB of u32
+    let src = DeviceBuffer::<u32>::zeroed(&stream, n).expect("failed to allocate source buffer");
+    for _ in 0..64 {
+        let mut dst = unsafe { DeviceBuffer::<u32>::uninitialized_async(&stream, n) }
+            .expect("failed to allocate uninitialized device buffer");
+        dst.copy_from_device_async(&src, &stream)
+            .expect("failed to enqueue device-to-device copy");
+        let dst = dst.cast_elem::<std::num::Wrapping<u32>>();
+        drop(dst);
+    }
+    stream.synchronize().expect("stream sync failed");
+}
