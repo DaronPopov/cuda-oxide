@@ -155,7 +155,7 @@ pub mod ops {
         r#type::TypeObj,
         value::Value,
     };
-    use pliron_derive::pliron_op;
+    use pliron_derive::{pliron_attr, pliron_op};
     use pliron_llvm::attributes::AlignmentAttr;
     pub use pliron_llvm::ops::{GlobalOp, InlineAsmOp};
 
@@ -176,7 +176,8 @@ pub mod ops {
     ///
     /// - **`preserves_flags`/`nostack`** are CPU concepts with no PTX
     ///   equivalent.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[pliron_attr(name = "llvm.asm_kind", format, verifier = "succ")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum AsmKind {
         /// Convergent + side effects. Warp-synchronous operations that
         /// synchronize threads or write memory: `bar.sync`, `mma.sync`,
@@ -221,8 +222,6 @@ pub mod ops {
             constraints: &str,
             kind: AsmKind,
         ) -> Self {
-            use pliron::builtin::attributes::StringAttr;
-
             let convergent = matches!(kind, AsmKind::Convergent | AsmKind::ConvergentPure);
             let op = InlineAsmOp::new(
                 ctx,
@@ -232,18 +231,8 @@ pub mod ops {
                 constraints,
                 convergent,
             );
-
-            let kind_str = match kind {
-                AsmKind::Convergent => "convergent",
-                AsmKind::ConvergentPure => "convergent_pure",
-                AsmKind::SideEffect => "side_effect",
-                AsmKind::Pure => "pure",
-            };
             let key = Identifier::try_new(ASM_KIND_KEY.to_string()).expect("valid identifier");
-            op.get_operation()
-                .deref_mut(ctx)
-                .attributes
-                .set(key, StringAttr::new(kind_str.to_string()));
+            op.get_operation().deref_mut(ctx).attributes.set(key, kind);
             op
         }
     }
@@ -254,21 +243,12 @@ pub mod ops {
     /// (e.g., user-written `ptx_asm!` ops, which carry separate sideeffect /
     /// convergent attributes instead).
     pub fn asm_kind_opt(ctx: &Context, op: &InlineAsmOp) -> Option<AsmKind> {
-        use pliron::builtin::attributes::StringAttr;
-
         let key = Identifier::try_new(ASM_KIND_KEY.to_string()).expect("valid identifier");
-        let op_ref = op.get_operation().deref(ctx);
-        let kind_str: Option<String> = op_ref
+        op.get_operation()
+            .deref(ctx)
             .attributes
-            .get::<StringAttr>(&key)
-            .map(|s| String::from((*s).clone()));
-        match kind_str.as_deref() {
-            Some("convergent") => Some(AsmKind::Convergent),
-            Some("convergent_pure") => Some(AsmKind::ConvergentPure),
-            Some("pure") => Some(AsmKind::Pure),
-            Some("side_effect") => Some(AsmKind::SideEffect),
-            _ => None,
-        }
+            .get::<AsmKind>(&key)
+            .copied()
     }
 
     /// Query the [`AsmKind`] stored on an `InlineAsmOp`.
