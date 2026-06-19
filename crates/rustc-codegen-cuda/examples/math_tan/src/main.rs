@@ -99,9 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Angles in radians kept clear of the `±pi/2` asymptotes (|x| <= ~1.3)
     // so `tan` stays finite and the ULP comparison is meaningful. Values are
     // f32-representable so the same array doubles as f64 input after a cast.
+    let qpi = std::f32::consts::FRAC_PI_4; // pi/4: tan(pi/4) == 1, a clean check point
     let xs_f32: Vec<f32> = vec![
-        0.0, 0.25, -0.25, 0.5, -0.5, 0.7853982, -0.7853982, 1.0, -1.0, 1.2, -1.2, 0.1, -0.1, 0.33,
-        -0.33, 1.3,
+        0.0, 0.25, -0.25, 0.5, -0.5, qpi, -qpi, 1.0, -1.0, 1.2, -1.2, 0.1, -0.1, 0.33, -0.33, 1.3,
     ];
     let xs_f64: Vec<f64> = xs_f32.iter().map(|&v| v as f64).collect();
     let n = xs_f32.len();
