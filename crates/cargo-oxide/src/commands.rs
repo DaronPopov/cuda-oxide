@@ -674,7 +674,7 @@ fn nvvm_compute_arch(arch: &str) -> String {
 /// cuda-oxide exports NVVM IR 2.0 (opaque pointers, LLVM 20 dialect). NVIDIA's
 /// libNVVM only parses that dialect for compute_100 and newer (Blackwell+);
 /// older targets route to the typed-pointer (NVVM IR 1.x) parser and reject the
-/// module while parsing types. See https://github.com/NVlabs/cuda-oxide/issues/98.
+/// module while parsing types. See <https://github.com/NVlabs/cuda-oxide/issues/98>.
 const NVVM_OPAQUE_PTR_MIN_CC: u32 = 100;
 
 /// Parse the numeric compute capability out of a `compute_XX` string.

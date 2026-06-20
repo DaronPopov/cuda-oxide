@@ -113,7 +113,7 @@ enum Commands {
         /// Comma-separated list of features to enable
         #[arg(long)]
         features: Option<String>,
-        /// Output path for the `.ltoir` file (default: <crate-dir>/<crate>.ltoir)
+        /// Output path for the `.ltoir` file (default: `<crate-dir>/<crate>.ltoir`)
         #[arg(long, short)]
         output: Option<PathBuf>,
         /// Show verbose compilation output
