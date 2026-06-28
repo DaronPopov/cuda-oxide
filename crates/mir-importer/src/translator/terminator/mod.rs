@@ -65,6 +65,7 @@ use crate::translator::rvalue;
 use crate::translator::values::ValueMap;
 use dialect_mir::ops::{
     MirAssertOp, MirCondBranchOp, MirConstantOp, MirEqOp, MirGotoOp, MirNotOp, MirReturnOp,
+    MirUnrollHintOp,
 };
 use dialect_nvvm::ops::{
     ReadPtxSregCtaidXOp, ReadPtxSregCtaidYOp, ReadPtxSregLanemaskEqOp, ReadPtxSregLanemaskGeOp,
@@ -964,6 +965,42 @@ fn translate_call(
         }
     }
 
+    // Per-loop unroll marker from `#[unroll]` / `#[unroll(N)]`. The enclosing
+    // `#[kernel]` or `#[device]` macro injects this call at the start of the loop
+    // body, so we plant a `mir.unroll_hint` op right here, inside that loop
+    // body. The loop-unroll pass later maps the hint back to its enclosing loop
+    // (via LoopInfo) and consumes it, so it never reaches lowering. The factor
+    // is the call's const generic (`0` = full unroll). Then branch to the
+    // target as usual.
+    // Match both the full path (`cuda_device::thread::__unroll_config`) and the
+    // re-exported short path (`cuda_device::__unroll_config`), mirroring the
+    // robust suffix match in `body::detect_unroll_config`.
+    if let Some(ref name) = pattern_name
+        && (name == "__unroll_config" || name.ends_with("::__unroll_config"))
+    {
+        let Some(factor) = extract_unroll_factor(func) else {
+            return input_err!(
+                loc,
+                TranslationErr::invalid_op(
+                    "could not read the const-generic factor from an unroll marker",
+                )
+            );
+        };
+        let Some(target) = target_usize else {
+            return input_err!(
+                loc,
+                TranslationErr::invalid_op("an unroll marker call has no return target")
+            );
+        };
+        let hint = MirUnrollHintOp::new(ctx, factor).get_operation();
+        hint.deref_mut(ctx).set_loc(loc.clone());
+        match prev_op {
+            Some(prev) => hint.insert_after(ctx, prev),
+            None => hint.insert_at_front(block_ptr, ctx),
+        }
+        return Ok(helpers::emit_goto(ctx, target, hint, block_map, loc));
+    }
+
     // Handle DynamicSharedArray specially to extract the ALIGN const generic
     if let Some(ref name) = pattern_name
         && name.contains("DynamicSharedArray")
@@ -1551,6 +1588,35 @@ fn extract_closure_body_name(closure_arg: &mir::Operand, body: &mir::Body) -> Op
         .map(|instance| instance.mangled_name())
 }
 
+/// Read the const-generic `FACTOR` from a `__unroll_config::<FACTOR>()` callee
+/// (`0` = full unroll).
+///
+/// Returns `None` when the callee is malformed instead of silently turning the
+/// request into a full unroll.
+fn extract_unroll_factor(func: &mir::Operand) -> Option<u32> {
+    use rustc_public::ty::{RigidTy, TyConstKind, TyKind};
+    let mir::Operand::Constant(constant) = func else {
+        return None;
+    };
+    let TyKind::RigidTy(RigidTy::FnDef(_, args)) = constant.const_.ty().kind() else {
+        return None;
+    };
+    if let Some(arg) = args.0.first()
+        && let rustc_public::ty::GenericArgKind::Const(c) = arg
+    {
+        return match c.kind() {
+            TyConstKind::Value(_, alloc) => {
+                alloc.read_uint().ok().and_then(|v| u32::try_from(v).ok())
+            }
+            _ => c
+                .eval_target_usize()
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+        };
+    }
+    None
+}
+
 /// Extracts function metadata from a MIR function operand.
 ///
 /// Returns a tuple of:
@@ -1593,7 +1659,6 @@ fn extract_closure_body_name(closure_arg: &mir::Operand, body: &mir::Body) -> Op
 /// FQDN and the device linker (libdevice, external LTOIR) only knows the
 /// link symbol. `call_name` for those is `Instance::mangled_name`, which is
 /// the link symbol (it honours `#[link_name]`).
-///
 fn extract_func_info(func: &mir::Operand) -> (Option<String>, Option<String>, Option<String>) {
     match func {
         mir::Operand::Constant(const_op) => match const_op.const_.kind() {
@@ -2718,7 +2783,6 @@ fn try_dispatch_intrinsic(
                 loc,
             )))
         }
-
         // =================================================================
         // Warp Primitives (from intrinsics::warp)
         // =================================================================
@@ -3432,6 +3496,35 @@ fn try_dispatch_intrinsic(
         }
 
         // =================================================================
+        // Async Copy (cp.async) Operations (from intrinsics::cp_async)
+        // =================================================================
+        "cuda_device::async_copy::cp_async_ca_4" => {
+            Ok(Some(intrinsics::cp_async::emit_cp_async_ca_4(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::async_copy::cp_async_ca_8" => {
+            Ok(Some(intrinsics::cp_async::emit_cp_async_ca_8(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::async_copy::cp_async_ca_zfill_4" => {
+            Ok(Some(intrinsics::cp_async::emit_cp_async_ca_zfill_4(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::async_copy::cp_async_ca_zfill_8" => {
+            Ok(Some(intrinsics::cp_async::emit_cp_async_ca_zfill_8(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::async_copy::cp_async_ca_zfill_16" => {
+            Ok(Some(intrinsics::cp_async::emit_cp_async_ca_zfill_16(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+
+        // =================================================================
         // Memory Operations (from intrinsics::memory)
         // Note: stmatrix and cvt are under cuda_device::tcgen05::
         // =================================================================
@@ -3525,6 +3618,107 @@ fn try_dispatch_intrinsic(
             loc,
         )?)),
         "cuda_device::dotprod::dp2a_u32" => Ok(Some(intrinsics::dotprod::emit_dp2a_u32(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        // =================================================================
+        // bf16x2 packed arithmetic (from intrinsics::bf16x2)
+        // =================================================================
+        "cuda_device::bf16x2::fma_relu_bf16x2" => {
+            Ok(Some(intrinsics::bf16x2::emit_fma_relu_bf16x2(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::bf16x2::add_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_add_bf16x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::bf16x2::sub_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_sub_bf16x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::bf16x2::mul_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_mul_bf16x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::bf16x2::min_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_min_bf16x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::bf16x2::max_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_max_bf16x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::bf16x2::neg_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_neg_bf16x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::bf16x2::abs_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_abs_bf16x2(
             ctx,
             body,
             args,

@@ -3224,6 +3224,12 @@ mod kernels {
     /// CLC work-stealing: rank 0 issues clc_try_cancel_multicast; both CTAs receive the
     /// response via CLC_BAR. Tile indices are derived by dividing the CLC first_ctaid_x
     /// by the cluster size (2), NOT using raw CTA IDs.
+    ///
+    /// # Shape contract
+    ///
+    /// `k` must be a multiple of 256. With a K tile size of 64, this makes `k_iters`
+    /// a multiple of four, so every output tile starts on pipeline stage 0. The MMA
+    /// consumer relies on that reset to keep its unrolled stage selection constant.
     #[kernel]
     #[cluster_launch(2, 1, 1)]
     pub unsafe fn gemm_sol_clc_multicast_4_stage_pipeline(
@@ -3282,6 +3288,10 @@ mod kernels {
             // memory barrier address, redirecting TMA completions to the leader CTA's
             // barrier.
             const PEER_BIT_MASK: u32 = 0xFEFFFFF8;
+            // L2 cache-blocking: visit tiles in vertical N-bands SWIZZLE_G wide so
+            // tiles done near-in-time share A-rows + a small set of B-cols in L2.
+            // This is the dominant data-movement lever at large sizes (~+88% @16384).
+            const SWIZZLE_G: u32 = 8;
 
             let n = n as u32;
             let k = k as u32;
@@ -3349,8 +3359,25 @@ mod kernels {
                 // correct (each CTA computed its own rank's 128 rows at the wrong tile).
                 let cluster_base_id = thread::blockIdx_x() - my_rank;
                 let tile_idx = cluster_base_id / 2;
-                let first_tile_m = tile_idx % tiles_m;
-                let first_tile_n = tile_idx / tiles_m;
+                // CACHE-BLOCKING SWIZZLE (CUTLASS-style threadblock rasterization).
+                // Group tile_n columns into bands of width SWIZZLE_G; within a band,
+                // consecutive linear indices sweep the band's columns for each tile_m
+                // before advancing tile_m, so near-in-time tiles reuse 1 A-block + G
+                // adjacent B-blocks -> higher L2 hit rate. Pure index->(m,n) bijection;
+                // the epilogue addresses C from TILE_INFO, so every tile is still
+                // computed exactly once and the result is bit-identical.
+                let tiles_n = _tiles_n;
+                let group_tiles = SWIZZLE_G * tiles_m;
+                let group = tile_idx / group_tiles;
+                let in_group = tile_idx % group_tiles;
+                let n_start = group * SWIZZLE_G;
+                let band_w = if SWIZZLE_G < tiles_n - n_start {
+                    SWIZZLE_G
+                } else {
+                    tiles_n - n_start
+                };
+                let first_tile_m = in_group / band_w;
+                let first_tile_n = n_start + in_group % band_w;
 
                 if is_lane0 {
                     *(&raw mut TILE_INFO as *mut u32).add(0) = first_tile_m;
@@ -3477,8 +3504,19 @@ mod kernels {
                     // pair. Divide by 2 to get the tile index.
                     let first_stolen = clc_query_get_first_ctaid_x(resp_lo, resp_hi);
                     let tile_idx = first_stolen / 2;
-                    let tile_m = tile_idx % tiles_m;
-                    let tile_n = tile_idx / tiles_m;
+                    // Same cache-blocking swizzle as the initial tile (see above).
+                    let tiles_n = _tiles_n;
+                    let group_tiles = SWIZZLE_G * tiles_m;
+                    let group = tile_idx / group_tiles;
+                    let in_group = tile_idx % group_tiles;
+                    let n_start = group * SWIZZLE_G;
+                    let band_w = if SWIZZLE_G < tiles_n - n_start {
+                        SWIZZLE_G
+                    } else {
+                        tiles_n - n_start
+                    };
+                    let tile_m = in_group / band_w;
+                    let tile_n = n_start + in_group % band_w;
 
                     if is_lane0 {
                         *(&raw mut TILE_INFO as *mut u32).add(0) = tile_m;
@@ -3602,9 +3640,14 @@ mod kernels {
 
                     let tile_k_base = tile_iter * k_iters;
                     let mut k_idx: u32 = 0;
+                    // Unroll one full pipeline cycle. The launch contract guarantees
+                    // k_iters % 4 == 0, so the producer's global stage and this local
+                    // stage agree at every tile boundary. Keeping this expression
+                    // loop-local lets the unroll pass fold each stage match.
+                    #[unroll(4)]
                     while k_idx < k_iters {
                         let global_k = tile_k_base + k_idx;
-                        let stage = global_k & 3;
+                        let stage = k_idx & 3;
                         let tma_parity = (global_k >> 2) & 1;
 
                         let (smem_a_base, smem_b_base, tma_bar_const, mma_bar_mut): (
@@ -6113,7 +6156,7 @@ fn run_correctness_test_clc_multicast_4_stage_pipeline(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m.is_multiple_of(256) && n.is_multiple_of(128) && k.is_multiple_of(64));
+    assert!(m.is_multiple_of(256) && n.is_multiple_of(128) && k.is_multiple_of(256));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("CLC + cta_group::2 + 4-stage SMEM pipeline.");
@@ -6311,7 +6354,7 @@ fn run_benchmark_clc_multicast_4_stage_pipeline(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m.is_multiple_of(256) && n.is_multiple_of(128) && k.is_multiple_of(64));
+    assert!(m.is_multiple_of(256) && n.is_multiple_of(128) && k.is_multiple_of(256));
 
     let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
     let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
