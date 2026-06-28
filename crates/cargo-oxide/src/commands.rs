@@ -2245,6 +2245,38 @@ mod tests {
     }
 
     #[test]
+    fn generated_file_cleanup_preserves_ltoir_cubin_cache() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_clean_cache_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for extension in ["ptx", "ll", "ltoir", "cubin", "target"] {
+            std::fs::write(root.join(format!("my_kernel.{extension}")), b"stale").unwrap();
+        }
+        let cached_cubin =
+            root.join(".oxide-artifacts/ltoir-cubin-cache/v1/entries/key/image.cubin");
+        std::fs::create_dir_all(cached_cubin.parent().unwrap()).unwrap();
+        std::fs::write(&cached_cubin, b"persistent cache entry").unwrap();
+
+        clean_generated_files(&root, "my-kernel");
+
+        for extension in ["ptx", "ll", "ltoir", "cubin", "target"] {
+            assert!(!root.join(format!("my_kernel.{extension}")).exists());
+        }
+        assert_eq!(
+            std::fs::read(&cached_cubin).unwrap(),
+            b"persistent cache entry"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn build_rustflags_appends_existing_rustflags_after_required_flags() {
         let rustflags = build_rustflags_with_existing(
             Path::new("/tmp/librustc_codegen_cuda.so"),

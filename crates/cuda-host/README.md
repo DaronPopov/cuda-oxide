@@ -138,8 +138,18 @@ embedded bundle and in the `<module>.target` file used by the lower-level
 loader.
 
 Older artifacts without a recorded target must be rebuilt or loaded with
-`CUDA_OXIDE_TARGET` set to their original target. The lower-level builder
-recompiles NVVM IR instead of reusing a cubin based only on file timestamps.
+`CUDA_OXIDE_TARGET` set to their original target.
+
+File-backed NVVM IR and LTOIR cache native cubins below
+`.oxide-artifacts/ltoir-cubin-cache/v1`. A cache entry is reused only when the
+source, target, module names, ordered options, libdevice, and exact loaded
+libNVVM/nvJitLink binaries all match. The cubin and optional LTOIR are verified
+and published together, so a stopped or concurrent build cannot mix outputs.
+If either CUDA library cannot be identified exactly, cuda-oxide rebuilds. PTX
+selection and the pre-Blackwell to Blackwell PTX bridge do not use this cache.
+The first compiler/linker handles are retained for the process lifetime;
+restart the process to select another toolkit or after replacing one in place.
+Remove the `.oxide-artifacts` directory to clear all cached entries.
 
 ## Tiling Utilities (tcgen05)
 

@@ -42,9 +42,11 @@
 use libloading::{Library, Symbol};
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::fmt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::str::FromStr;
+use std::time::SystemTime;
 use thiserror::Error;
 
 // ============================================================================
@@ -261,6 +263,8 @@ pub struct LibdeviceNotFound {
 /// its own symbols.
 pub struct LibNvvm {
     _lib: Library,
+    loaded_file: Option<File>,
+    loaded_identity: Option<LibraryFileIdentity>,
     create_program: unsafe extern "C" fn(*mut NvvmProgram) -> NvvmResult,
     destroy_program: unsafe extern "C" fn(*mut NvvmProgram) -> NvvmResult,
     add_module:
@@ -322,10 +326,34 @@ impl LibNvvm {
     ///
     /// See the crate-level docs for the exact discovery order.
     pub fn load() -> Result<Self, NvvmError> {
+        Self::load_inner(false)
+    }
+
+    /// Load libNVVM while retaining an exact, fingerprintable descriptor when
+    /// the platform supports it.
+    ///
+    /// This is intended for a process-wide pinned compiler cache handle. On
+    /// Linux it opens the concrete library before `dlopen` and retains that
+    /// descriptor so callers can fingerprint the selected file. Callers must
+    /// retain the returned `LibNvvm` for the process lifetime and restart to
+    /// change toolkits. General callers should use [`LibNvvm::load`] instead.
+    #[doc(hidden)]
+    pub fn load_for_cache() -> Result<Self, NvvmError> {
+        Self::load_inner(true)
+    }
+
+    fn load_inner(retain_exact_file: bool) -> Result<Self, NvvmError> {
         let mut tried = Vec::new();
-        let lib = open_library(&mut tried).ok_or_else(|| NvvmError::LibraryNotFound {
-            tried: tried.join("\n  "),
+        let opened = open_library(&mut tried, retain_exact_file).ok_or_else(|| {
+            NvvmError::LibraryNotFound {
+                tried: tried.join("\n  "),
+            }
         })?;
+        let OpenedLibrary {
+            library: lib,
+            loaded_file,
+            loaded_identity,
+        } = opened;
 
         unsafe {
             Ok(LibNvvm {
@@ -342,9 +370,26 @@ impl LibNvvm {
                 version: resolve(&lib, "nvvmVersion")?,
                 ir_version: resolve(&lib, "nvvmIRVersion")?,
                 llvm_version: resolve_optional(&lib, "nvvmLLVMVersion"),
+                loaded_file,
+                loaded_identity,
                 _lib: lib,
             })
         }
+    }
+
+    /// Return the exact file descriptor used to load libNVVM, provided that
+    /// its contents have not changed since `dlopen`.
+    ///
+    /// [`LibNvvm::load_for_cache`] opens concrete library paths before loading
+    /// them and retains the descriptor. Callers may fingerprint it to bind
+    /// cached compiler output to the process-pinned tool. Ordinary
+    /// [`LibNvvm::load`] calls return `None` here. Any `None` result means
+    /// cache reuse must be skipped.
+    #[doc(hidden)]
+    pub fn loaded_file_if_unchanged(&self) -> Option<&File> {
+        let identity = self.loaded_identity.as_ref()?;
+        let file = self.loaded_file.as_ref()?;
+        identity.matches_file(file).then_some(file)
     }
 
     /// Query libNVVM's version as `(major, minor)`. Wraps `nvvmVersion`,
@@ -574,31 +619,127 @@ fn error_string(nvvm: &LibNvvm, r: NvvmResult) -> Option<String> {
     )
 }
 
-fn open_library(tried: &mut Vec<String>) -> Option<Library> {
+#[derive(Debug, PartialEq, Eq)]
+struct LibraryFileIdentity {
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    change_time: (i64, i64),
+}
+
+impl LibraryFileIdentity {
+    fn capture_file(file: &File) -> Option<Self> {
+        Self::from_metadata(&file.metadata().ok()?)
+    }
+
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        let modified = metadata.modified().ok()?;
+
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        Some(Self {
+            len: metadata.len(),
+            modified,
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            change_time: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+
+    fn matches_file(&self, file: &File) -> bool {
+        Self::capture_file(file).as_ref() == Some(self)
+    }
+
+    fn matches_path(&self, path: &Path) -> bool {
+        path.metadata()
+            .ok()
+            .as_ref()
+            .and_then(Self::from_metadata)
+            .as_ref()
+            == Some(self)
+    }
+}
+
+struct OpenedLibrary {
+    library: Library,
+    loaded_file: Option<File>,
+    loaded_identity: Option<LibraryFileIdentity>,
+}
+
+fn open_library(tried: &mut Vec<String>, retain_exact_file: bool) -> Option<OpenedLibrary> {
     if let Ok(p) = std::env::var("LIBNVVM_PATH") {
         let path = PathBuf::from(&p);
         tried.push(path.display().to_string());
-        if let Ok(lib) = unsafe { Library::new(&path) } {
-            return Some(lib);
+        if let Some(opened) = open_library_path(&path, retain_exact_file) {
+            return Some(opened);
         }
     }
 
     for root in cuda_roots() {
         let path = root.join("nvvm/lib64/libnvvm.so");
         tried.push(path.display().to_string());
-        if let Ok(lib) = unsafe { Library::new(&path) } {
-            return Some(lib);
+        if let Some(opened) = open_library_path(&path, retain_exact_file) {
+            return Some(opened);
         }
     }
 
     for soname in ["libnvvm.so.4", "libnvvm.so.3", "libnvvm.so"] {
         tried.push(soname.to_string());
         if let Ok(lib) = unsafe { Library::new(soname) } {
-            return Some(lib);
+            return Some(OpenedLibrary {
+                library: lib,
+                loaded_file: None,
+                loaded_identity: None,
+            });
         }
     }
 
     None
+}
+
+fn open_library_path(path: &Path, retain_exact_file: bool) -> Option<OpenedLibrary> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = retain_exact_file;
+    #[cfg(target_os = "linux")]
+    let canonical_path = path.canonicalize().ok();
+
+    #[cfg(target_os = "linux")]
+    if retain_exact_file
+        && let Some(canonical_path) = canonical_path.as_deref()
+        && let Ok(file) = File::open(canonical_path)
+        && file.metadata().is_ok_and(|metadata| metadata.is_file())
+    {
+        let identity = LibraryFileIdentity::capture_file(&file);
+        // Load the same absolute file we opened. Re-resolving a relative path
+        // could select another DSO if the process working directory changes.
+        if let Ok(lib) = unsafe { Library::new(canonical_path) } {
+            let identity = identity.filter(|identity| {
+                identity.matches_file(&file) && identity.matches_path(canonical_path)
+            });
+            return Some(OpenedLibrary {
+                library: lib,
+                loaded_file: Some(file),
+                loaded_identity: identity,
+            });
+        }
+    }
+
+    let lib = unsafe { Library::new(path) }.ok()?;
+    Some(OpenedLibrary {
+        library: lib,
+        // Loading by pathname cannot prove which mapping the dynamic loader
+        // returned when another handle already exists for that pathname.
+        loaded_file: None,
+        loaded_identity: None,
+    })
 }
 
 fn cuda_roots() -> Vec<PathBuf> {
@@ -666,6 +807,54 @@ fn find_libdevice_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_descriptor_remains_bound_to_replaced_inode() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "libnvvm-sys-identity-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let library_path = directory.join("libnvvm.so");
+        let replacement_path = directory.join("replacement.so");
+        std::fs::write(&library_path, b"original-library").unwrap();
+        std::fs::write(
+            &replacement_path,
+            b"replacement-library-with-different-length",
+        )
+        .unwrap();
+
+        let canonical_path = library_path.canonicalize().unwrap();
+        let opened = File::open(&canonical_path).unwrap();
+        let opened_identity = LibraryFileIdentity::capture_file(&opened).unwrap();
+        assert!(opened_identity.matches_file(&opened));
+        assert!(opened_identity.matches_path(&canonical_path));
+
+        std::fs::remove_file(&library_path).unwrap();
+        std::fs::rename(&replacement_path, &library_path).unwrap();
+        assert!(!opened_identity.matches_path(&canonical_path));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let opened_metadata = opened.metadata().unwrap();
+            assert_eq!(opened_identity.device, opened_metadata.dev());
+            assert_eq!(opened_identity.inode, opened_metadata.ino());
+            let replacement_file = File::open(&canonical_path).unwrap();
+            let replacement = LibraryFileIdentity::capture_file(&replacement_file).unwrap();
+            assert_ne!(
+                (opened_identity.device, opened_identity.inode),
+                (replacement.device, replacement.inode)
+            );
+        }
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn nvvm_result_representation_accepts_cancelled_and_future_codes() {

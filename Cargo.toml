@@ -79,6 +79,7 @@ combine = "4.6"
 log = "0.4"
 half = "2.7"
 libloading = "0.8"
+sha2 = "0.10"
 
 # llvm-export deps
 rustc-hash = "2.0"

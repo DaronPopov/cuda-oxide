@@ -1667,12 +1667,21 @@ mod tests {
         for suffix in ["ll", "ptx", "target", "ltoir", "cubin", "cubin.target"] {
             fs::write(root.join(format!("kernel.{suffix}")), b"stale").unwrap();
         }
+        let cached_cubin =
+            root.join(".oxide-artifacts/ltoir-cubin-cache/v1/entries/key/image.cubin");
+        fs::create_dir_all(cached_cubin.parent().unwrap()).unwrap();
+        fs::write(&cached_cubin, b"persistent cache entry").unwrap();
 
         clear_stale_compilation_artifacts(&root, "kernel").unwrap();
 
         for suffix in ["ll", "ptx", "target", "ltoir", "cubin", "cubin.target"] {
             assert!(!root.join(format!("kernel.{suffix}")).exists(), "{suffix}");
         }
+        assert_eq!(
+            fs::read(&cached_cubin).unwrap(),
+            b"persistent cache entry",
+            "content-addressed cache entries must survive compiler cleanup"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
