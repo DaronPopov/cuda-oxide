@@ -9,6 +9,8 @@
 //! handles with RAII lifetimes and provide `borrow_raw` constructors
 //! for interop with external frameworks (cudarc, etc.).
 
+mod lifecycle;
+
 use std::ffi::{c_int, c_void, CString};
 use std::sync::Arc;
 
@@ -95,19 +97,8 @@ impl Drop for Device {
         if !self.owned {
             return;
         }
-        let _guard = teardown_lock();
-        // Streams hold an Arc<Device>, so by the time the last device handle
-        // for this ordinal drops, every pooled handle is idle; the context
-        // release below reclaims them. Discard so a later re-retain cannot
-        // pop a handle from a torn-down context.
-        stream_pool()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.ordinal);
-        let _ = self.bind_to_thread();
-        let ctx = std::mem::replace(&mut self.cu_ctx, std::ptr::null_mut());
-        if !ctx.is_null() {
-            let _ = unsafe { primary_ctx::release(self.cu_device) };
+        if self.close().is_err() {
+            self.drop_close();
         }
     }
 }

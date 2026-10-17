@@ -128,3 +128,28 @@ fn many_borrowed_drops_do_not_invalidate_source() {
     unsafe { source_stream.synchronize() }.unwrap();
     let _another = source_dev.new_stream().unwrap();
 }
+
+#[test]
+fn explicit_close_reports_success_and_disarms_drop() {
+    if !has_gpu() {
+        return;
+    }
+    let mut device = Device::new(0).unwrap();
+    let mut stream = device.new_stream().unwrap();
+    std::sync::Arc::get_mut(&mut stream)
+        .unwrap()
+        .close()
+        .unwrap();
+    drop(stream);
+    std::sync::Arc::get_mut(&mut device)
+        .unwrap()
+        .close()
+        .unwrap();
+    drop(device);
+
+    let mut reopened = Device::new(0).unwrap();
+    std::sync::Arc::get_mut(&mut reopened)
+        .unwrap()
+        .close()
+        .unwrap();
+}
