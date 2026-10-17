@@ -140,7 +140,15 @@ fn explicit_close_reports_success_and_disarms_drop() {
         .unwrap()
         .close()
         .unwrap();
+    std::sync::Arc::get_mut(&mut stream)
+        .unwrap()
+        .close()
+        .unwrap();
     drop(stream);
+    std::sync::Arc::get_mut(&mut device)
+        .unwrap()
+        .close()
+        .unwrap();
     std::sync::Arc::get_mut(&mut device)
         .unwrap()
         .close()
