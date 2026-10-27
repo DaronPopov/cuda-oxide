@@ -29,7 +29,7 @@ flags = ["-Zmiri-disable-stacked-borrows", "-Zmiri-disable-validation", "-Zmiri-
 
 [backends.miri-repo]
 type = "miri-repo"
-path = "/home/ben/miri"
+path = "./miri"
 flags = ["-Zmiri-tree-borrows"]
 
 [backends.llvm]
@@ -49,7 +49,7 @@ flags = ["-Zmir-opt-level=0", "-Copt-level=3"]
 
 [backends.cranelift-repo]
 type = "cranelift-repo"
-path = "/home/ben/rustc_codegen_cranelift"
+path = "./rustc_codegen_cranelift"
 flags = ["-Zmir-opt-level=0", "-Copt-level=3"]
 
 [backends.cranelift-binary]
@@ -59,5 +59,5 @@ flags = ["-Zmir-opt-level=0", "-Copt-level=3"]
 
 [backends.gcc]
 type = "gcc"
-path = "/home/ben/rustc_codegen_gcc"
+path = "./rustc_codegen_gcc"
 flags = ["-Zmir-opt-level=0", "-Copt-level=3"]
